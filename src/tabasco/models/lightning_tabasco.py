@@ -18,7 +18,7 @@ from tabasco.utils.metrics import (
     AtomTypeDistribution,
     AtomFractionMetric,
 )
-
+from tabasco.utils.save_gen_mol import SaveGeneratedMols
 
 class LightningTabasco(L.LightningModule):
     """Thin Lightning wrapper around a flow-matching molecule generator.
@@ -42,6 +42,10 @@ class LightningTabasco(L.LightningModule):
         """
         super().__init__()
         self.model = model
+        self.save_gen_mol = SaveGeneratedMols()
+        self.num_sampling_steps = 100
+        self.compute_every = 10000
+        self.next_compute_step = 0
         self.save_hyperparameters()
 
         self.mol_converter = MoleculeConverter()
@@ -113,6 +117,21 @@ class LightningTabasco(L.LightningModule):
         for k, v in stats_dict.items():
             self.log(f"val/{k}", v, on_epoch=True, sync_dist=True)
         self.log("val/loss", loss, on_epoch=True, sync_dist=True)
+        
+        # if self.trainer.global_rank == 0 and self.trainer.global_step >= self.next_compute_step:
+        #     # Update the counter for the next run
+        #     self.next_compute_step += self.compute_every
+        #     # Generate molecules using the current validation batch
+        #     generated_batch, trajectories = self.sample(
+        #         batch=batch, num_steps=self.num_sampling_steps, return_trajectories=True
+        #     )
+        #     # caculate rmsd between generated and reference molecules
+        #     # rmsd = self.mol_converter.rmsd_calculation(generated_batch, batch)
+        #     # log rmsd
+        #     # print(f"rmsd: {rmsd}")
+        #     mol_list = self.mol_converter.from_batch(generated_batch)
+        #     self.save_gen_mol.save_mol(self, generated_batch, trajectories, mol_list)
+        #     self.log("val/rmsd", rmsd, on_epoch=True, sync_dist=True)
 
     def test_step(self, batch):
         """Perform a single test step."""

@@ -17,6 +17,7 @@ from tabasco.chem.constants import ATOM_COLOR_MAP, ATOM_NAMES
 from tabasco.data.utils import batch_to_list
 from tabasco.utils import RankedLogger
 from rdkit import RDLogger
+from rdkit.Chem import rdMolAlign
 
 log = RankedLogger(__name__, rank_zero_only=True)
 
@@ -397,3 +398,28 @@ class MoleculeConverter:
             atom_idx = torch.argmax(atomics, dim=1)
 
         return coords, atom_idx
+
+    def rmsd_calculation(self, original_batch: TensorDict, batch: TensorDict, **kwargs) -> torch.Tensor:
+        """Calculate RMSD between two batches of molecules represented as TensorDicts, ignoring padding atoms.
+
+        Args:
+            original_batch (TensorDict): The original batch of molecule tensors.
+            batch (TensorDict): The batch of molecules to compare against the original batch.
+
+        Returns:
+            torch.Tensor: A tensor containing the RMSD for each molecule in the batch.
+        """
+
+        # Get the coordinates and padding mask for both the original and current batch
+        ori_mols = self.from_batch(original_batch)
+        target_mols = self.from_batch(batch)
+        rmsd = 0
+        n_valid = 0
+        for ori_mol, target_mol in zip(ori_mols, target_mols):
+            try:
+                rmsd += rdMolAlign.GetBestRMS(ori_mol, target_mol)
+                n_valid += 1
+            except:
+                continue
+
+        return rmsd/n_valid
