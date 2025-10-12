@@ -11,7 +11,7 @@ from tabasco.models.components.positional_encoder import (
     TimeFourierEncoding,
 )
 from tabasco.models.components.transformer import Transformer
-
+from tabasco.models.components.fsq import FSQ
 
 class TransformerModule(nn.Module):
     """Basic Transformer model for molecule generation."""
@@ -29,6 +29,7 @@ class TransformerModule(nn.Module):
         add_sinusoid_posenc: bool = True,
         concat_combine_input: bool = False,
         custom_weight_init: Optional[str] = None,
+        levels: list[int] = [4, 4, 4, 4, 4, 4],
     ):
         """
         Args:
@@ -53,6 +54,11 @@ class TransformerModule(nn.Module):
         self.custom_weight_init = custom_weight_init
         print(f"Implementation: {self.implementation}")
 
+        self.cond_embed = nn.Embedding(2, hidden_dim)
+
+        self.enc_linear_embed = nn.Linear(spatial_dim, hidden_dim, bias=False)
+        self.enc_atom_type_embed = nn.Embedding(atom_dim, hidden_dim)
+
         self.linear_embed = nn.Linear(spatial_dim, hidden_dim, bias=False)
         self.atom_type_embed = nn.Embedding(atom_dim, hidden_dim)
 
@@ -76,7 +82,18 @@ class TransformerModule(nn.Module):
             raise ValueError(f"Invalid activation: {activation}")
 
         if self.implementation == "pytorch":
-            encoder_layer = nn.TransformerEncoderLayer(
+            enc_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=num_heads,
+                dim_feedforward=hidden_dim * 4,
+                activation=activation,
+                batch_first=True,
+                norm_first=True,
+            )
+            self.enc_transformer = nn.TransformerEncoder(
+                enc_layer, num_layers=num_layers//4
+            )
+            diff_layer = nn.TransformerEncoderLayer(
                 d_model=hidden_dim,
                 nhead=num_heads,
                 dim_feedforward=hidden_dim * 4,
@@ -85,9 +102,14 @@ class TransformerModule(nn.Module):
                 norm_first=True,
             )
             self.transformer = nn.TransformerEncoder(
-                encoder_layer, num_layers=num_layers
+                diff_layer, num_layers=num_layers
             )
         elif self.implementation == "reimplemented":
+            self.enc_transformer = Transformer(
+                dim=hidden_dim,
+                num_heads=num_heads,
+                depth=num_layers//4,
+            )
             self.transformer = Transformer(
                 dim=hidden_dim,
                 num_heads=num_heads,
@@ -95,7 +117,10 @@ class TransformerModule(nn.Module):
             )
         else:
             raise ValueError(f"Invalid implementation: {self.implementation}")
-
+        self.quant_conv = nn.Linear(hidden_dim, 6)
+        self.quantizer = FSQ(levels)
+        self.quant_conv_out = nn.Linear(6, hidden_dim)
+        # self.quant_conv_out_norm = nn.LayerNorm(6)
         self.out_coord_linear = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, spatial_dim, bias=False),
@@ -152,21 +177,38 @@ class TransformerModule(nn.Module):
                         f"Invalid custom weight init: {self.custom_weight_init}"
                     )
 
-    def forward(self, coords, atomics, padding_mask, t) -> Tensor:
-        """Forward pass of the module."""
-        real_mask = 1 - padding_mask.int()
+    def encode(self, coord_ori, atomics_ori, padding_mask):
+        """Encode the input."""
+        embed_coords = self.enc_linear_embed(coord_ori)
+        embed_atom_types = self.enc_atom_type_embed(atomics_ori.argmax(dim=-1))
+        h_in = embed_coords + embed_atom_types
+        if self.implementation == "pytorch":
+            encode_embed = self.enc_transformer(h_in, src_key_padding_mask=padding_mask)
+        elif self.implementation == "reimplemented":
+            encode_embed = self.enc_transformer(h_in, padding_mask=padding_mask)
+        encode_embed = self.quant_conv(encode_embed)
+        # encode_embed = self.quant_conv_out_norm(encode_embed)
+        quant_embed, indices = self.quantizer(encode_embed)
+        quant_embed = self.quant_conv_out(encode_embed)
+        return quant_embed
 
-        embed_coords = self.linear_embed(coords)
-        embed_atom_types = self.atom_type_embed(atomics.argmax(dim=-1))
+    def forward(self, coord_ori, atomics_ori, padding_mask, coord_t, atomics_t, t, mode = "val") -> Tensor:
+        """Forward pass of the module."""
+
+        real_mask = 1 - padding_mask.int()
+        encode_embed = self.encode(coord_ori, atomics_ori, padding_mask) * real_mask.unsqueeze(-1)
+
+        embed_coords = self.linear_embed(coord_t)
+        embed_atom_types = self.atom_type_embed(atomics_t.argmax(dim=-1))
 
         if self.add_sinusoid_posenc:
             embed_posenc = self.positional_encoding(
-                batch_size=coords.shape[0], seq_len=coords.shape[1]
+                batch_size=coord_t.shape[0], seq_len=coord_t.shape[1]
             )
         else:
             embed_posenc = torch.zeros(
-                coords.shape[0], coords.shape[1], self.hidden_dim
-            ).to(coords.device)
+                coord_t.shape[0], coord_t.shape[1], self.hidden_dim
+            ).to(coord_t.device)
 
         embed_time = self.time_encoding(t).unsqueeze(1)
 
@@ -175,34 +217,47 @@ class TransformerModule(nn.Module):
         )
 
         if self.concat_combine_input:
-            embed_time = embed_time.repeat(1, coords.shape[1], 1)
+            embed_time = embed_time.repeat(1, coord_t.shape[1], 1)
             h_in = torch.cat(
                 [embed_coords, embed_atom_types, embed_posenc, embed_time], dim=-1
             )
             assert h_in.shape == (
-                coords.shape[0],
-                coords.shape[1],
+                coord_t.shape[0],
+                coord_t.shape[1],
                 4 * self.hidden_dim,
             ), f"h_in.shape: {h_in.shape}"
             h_in = self.combine_input(h_in)
-            assert h_in.shape == (coords.shape[0], coords.shape[1], self.hidden_dim), (
+            assert h_in.shape == (coord_t.shape[0], coord_t.shape[1], self.hidden_dim), (
                 f"h_in.shape: {h_in.shape}"
             )
         else:
             h_in = embed_coords + embed_atom_types + embed_posenc + embed_time
         h_in = h_in * real_mask.unsqueeze(-1)
-
+        # h_in = h_in + encode_embed
+        h_in = torch.cat( [h_in, encode_embed], dim=1)
+        cond_pos = torch.cat(
+                (
+                    torch.zeros(coord_t.shape[0], coord_t.shape[1], dtype=torch.long, device=coord_t.device),
+                    torch.ones(coord_t.shape[0], coord_t.shape[1], dtype=torch.long, device=coord_t.device),
+                ),
+                dim=-1,
+            )
+        h_in = h_in + self.cond_embed(cond_pos)
+        
         if self.implementation == "pytorch":
-            h_out = self.transformer(h_in, src_key_padding_mask=padding_mask)
+            h_out = self.transformer(h_in, src_key_padding_mask=torch.cat( [padding_mask, padding_mask], dim=1))
         elif self.implementation == "reimplemented":
-            h_out = self.transformer(h_in, padding_mask=padding_mask)
+            h_out = self.transformer(h_in, padding_mask=torch.cat( [padding_mask, padding_mask], dim=1))
 
+        # load the half of the input to the output
+        seq_len = coord_t.shape[1]
+        h_out = h_out[:, :seq_len, :]
         h_out = h_out * real_mask.unsqueeze(-1)
 
         if self.cross_attention:
             h_coord = self.coord_cross_attention(
                 h_out,
-                h_in,
+                h_in[:, :seq_len, :],
                 tgt_key_padding_mask=padding_mask,
                 memory_key_padding_mask=padding_mask,
             )
@@ -213,7 +268,7 @@ class TransformerModule(nn.Module):
         if self.cross_attention:
             h_atom = self.atom_cross_attention(
                 h_out,
-                h_in,
+                h_in[:, :seq_len, :],
                 tgt_key_padding_mask=padding_mask,
                 memory_key_padding_mask=padding_mask,
             )

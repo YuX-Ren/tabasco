@@ -81,19 +81,19 @@ class FlowMatchingModel(nn.Module):
         """Set the data statistics."""
         self.data_stats = stats
 
-    def _call_net(self, batch, t):
+    def _call_net(self,batch_ori, batch_t, t):
         """Wrapper around `self.net` for `torch.compile` compatibility."""
         coords, atom_logits = self.net(
-            batch["coords"], batch["atomics"], batch["padding_mask"], t
+            batch_ori["coords"], batch_ori["atomics"], batch_ori["padding_mask"],batch_t["coords"], batch_t["atomics"], t
         )
 
         return TensorDict(
             {
                 "coords": coords,
                 "atomics": atom_logits,
-                "padding_mask": batch["padding_mask"],
+                "padding_mask": batch_ori["padding_mask"],
             },
-            batch_size=batch["padding_mask"].shape[0],
+            batch_size=batch_ori["padding_mask"].shape[0],
         )
 
     def forward(self, batch, compute_stats: bool = True):
@@ -105,7 +105,7 @@ class FlowMatchingModel(nn.Module):
             )
 
         path = self._create_path(batch)
-        pred = self._call_net(path.x_t, path.t)
+        pred = self._call_net(path.x_1, path.x_t, path.t)
 
         loss, stats_dict = self._compute_loss(path, pred, compute_stats)
         return loss, stats_dict
@@ -267,7 +267,7 @@ class FlowMatchingModel(nn.Module):
             t = T[i - 1]
             dt = T[i] - T[i - 1]
 
-            x_t = self._step(x_t, t, dt)
+            x_t = self._step(batch, x_t, t, dt)
             if return_trajectories:
                 trajectories.append(deepcopy(x_t.detach().cpu()))
 
@@ -276,10 +276,10 @@ class FlowMatchingModel(nn.Module):
 
         return x_t
 
-    def _step(self, x_t, t, step_size):
+    def _step(self, batch, x_t, t, step_size):
         """Single Euler step at time `t` using model-predicted velocity."""
         with torch.no_grad():
-            out_batch = self._call_net(x_t, t)
+            out_batch = self._call_net(batch, x_t, t)
 
         x_t["coords"] = self.coords_interpolant.step(x_t, out_batch, t, step_size)
         x_t["atomics"] = self.atomics_interpolant.step(x_t, out_batch, t, step_size)
