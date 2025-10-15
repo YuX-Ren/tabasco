@@ -1,0 +1,2 @@
+using swanlab
+add swanlab.sync_wandb() to envs/*/site-packages/lightning/pytorch/loggers/wandb.py to init swanlab
