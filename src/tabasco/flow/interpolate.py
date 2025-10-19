@@ -408,7 +408,8 @@ class SDEMetricInterpolant(CenteredMetricInterpolant):
         )
 
         x_new = (
-            batch_t[self.key] + velocity * dt + component_score * dt + white_noise * dt
+            batch_t[self.key] + velocity * dt
+            # batch_t[self.key] + velocity * dt + component_score * dt + white_noise * dt
         )
         x_new = mask_and_zero_com(x_new, batch_t[self.key_pad_mask])
 
