@@ -137,7 +137,7 @@ class LmdbDataModule(LightningDataModule):
     def test_dataloader(self):
         """Return the test `DataLoader` (falls back to validation set when absent)."""
         return DataLoader(
-            self.val_dataset,
+            self.test_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             collate_fn=TensorDictCollator(),
