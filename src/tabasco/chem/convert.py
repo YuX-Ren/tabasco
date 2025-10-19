@@ -232,6 +232,24 @@ class MoleculeConverter:
 
         return mol
 
+    def get_atom_types_from_tensor(
+        self,
+        mol_tensor: TensorDict,
+    ):
+        """Get atom types from a TensorDict.
+        Args:
+            mol_tensor: Unbatched TensorDict.
+        Returns:
+            List of atom types.
+        """
+        atomics = mol_tensor["atomics"]
+
+        if "padding_mask" in mol_tensor:
+            padding_mask = mol_tensor["padding_mask"]
+            atom_types = self._get_atom_types(atomics, padding_mask)
+        
+        return atom_types
+
     def from_tensor(
         self,
         mol_tensor: TensorDict,
@@ -421,5 +439,5 @@ class MoleculeConverter:
                 n_valid += 1
             except:
                 continue
-
+        print(f"number of valid molecules: {n_valid}")
         return rmsd/n_valid

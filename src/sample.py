@@ -21,7 +21,7 @@ cfg = {
     "add_random_permutation": False,
     "reorder_to_smiles_order": True,
     "remove_hydrogens": True,
-    "batch_size": 256,
+    "batch_size": 2048,
     "num_workers": 0
 }
 
@@ -147,7 +147,10 @@ def main():
     out_batch_list = []
 
     # Sampling from validation data loader
-    for batch in datamodule.val_dataloader():
+    rmsds = 0
+    import tqdm
+    print(len(datamodule.val_dataloader()))
+    for batch in tqdm.tqdm(datamodule.val_dataloader()):
         batch = batch.to("cuda")
         out_batch = sample_batch(
             lightning_module=lightning_module,
@@ -156,20 +159,30 @@ def main():
             num_steps=num_steps,
         )
         out_batch_list.append(out_batch)
-        break
-    # calculate the rmsd between the generated and reference molecules
-    rmsd = lightning_module.mol_converter.rmsd_calculation(out_batch, batch)
-    print(f"rmsd: {rmsd}")
+        # calculate the rmsd between the generated and reference molecules
+        sq_diff = (out_batch["coords"] - batch["coords"]).pow(2).mean(dim=-1)
+        sq_diff = sq_diff * (~out_batch["padding_mask"])
+        per_batch_mse = sq_diff.mean(dim=-1)/(~out_batch["padding_mask"]).sum(dim=-1)
+        rmsd = per_batch_mse.sqrt().mean()
+        rmsds += rmsd
+    rmsds /= len(datamodule.val_dataloader())
+    print(f"rmsd: {rmsds}")
     mse = out_batch["coords"] - batch["coords"]
     mse = mse.pow(2).mean()
     print(f"mse: {mse}")
+    # compare the generated and reference molecules by atom type
+    for out_mol, batch_mol in zip(out_batch, batch):
+        out_atom_types = lightning_module.mol_converter.get_atom_types_from_tensor(out_mol)
+        batch_atom_types = lightning_module.mol_converter.get_atom_types_from_tensor(batch_mol)
+        if out_atom_types != batch_atom_types:
+            print(f"out atom types: {out_atom_types}, batch atom types: {batch_atom_types}")
     # Concatenate results from all batches
     out_batch = torch.cat(out_batch_list, dim=0)
 
     # Export the sampled batch to pickle if specified
-    if args.output_path is not None:
-        export_batch_to_sdf(batch, args.output_path.replace(".pkl", "_ref.pkl"))
-        export_batch_to_sdf(out_batch, args.output_path)
+    # if args.output_path is not None:
+    #     export_batch_to_sdf(batch, args.output_path.replace(".pkl", "_ref.pkl"))
+    #     export_batch_to_sdf(out_batch, args.output_path)
 
 
 if __name__ == "__main__":
