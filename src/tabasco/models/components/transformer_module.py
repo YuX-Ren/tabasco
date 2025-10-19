@@ -196,7 +196,6 @@ class TransformerModule(nn.Module):
         """Forward pass of the module."""
 
         real_mask = 1 - padding_mask.int()
-        encode_embed = self.encode(coord_ori, atomics_ori, padding_mask) * real_mask.unsqueeze(-1)
 
         embed_coords = self.linear_embed(coord_t)
         embed_atom_types = self.atom_type_embed(atomics_t.argmax(dim=-1))
@@ -209,6 +208,8 @@ class TransformerModule(nn.Module):
             embed_posenc = torch.zeros(
                 coord_t.shape[0], coord_t.shape[1], self.hidden_dim
             ).to(coord_t.device)
+
+        encode_embed = self.encode(coord_ori, atomics_ori, padding_mask) * real_mask.unsqueeze(-1) + embed_posenc * real_mask.unsqueeze(-1)
 
         embed_time = self.time_encoding(t).unsqueeze(1)
 
