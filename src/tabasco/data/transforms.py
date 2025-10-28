@@ -88,3 +88,61 @@ def apply_random_rotation(batch: TensorDict, n_augmentations=10) -> TensorDict:
     ).to(batch.device)
 
     return augmented_batch
+
+def apply_random_translation(batch: TensorDict, n_augmentations=10) -> TensorDict:
+    """Augment a batch with `n_augmentations` additional random translations.
+    """
+    naug = n_augmentations + 1
+    assert batch["coords"].ndim == 3, (
+        f"Augmetations can only be used for simple (x_1) batches [b, n, 3], current shape is {batch['coords'].shape}"
+    )
+    assert batch["padding_mask"].ndim == 2, (
+        f"Augmetations can only be used for simple (mask) batches [b, n], current shape is {batch['padding_mask'].shape}"
+    )
+    assert naug >= 1, f"Number of augmentations (int) should >= 1, currently {naug}"
+
+    x = batch["coords"].repeat(naug, 1, 1).to(batch.device)
+    mask = batch["padding_mask"].repeat(naug, 1).to(batch.device)
+    atomics = batch["atomics"].repeat(naug, 1, 1).to(batch.device)
+    lattices = batch["lattices"].repeat(naug, 1, 1).to(batch.device)
+    translations = torch.rand(x.shape[0], 1, 3, device=batch.device)
+
+    x_trans = (x + translations) % 1.0
+
+    augmented_batch = TensorDict(
+        {
+            "coords": x_trans,
+            "padding_mask": mask,
+            "atomics": atomics,
+            "lattices": lattices,
+        },
+        batch_size=x_trans.shape[0],
+    ).to(batch.device)
+
+    return augmented_batch
+
+def frac_to_cart_coords(
+    frac_coords,
+    lattices,
+    regularized = True,
+):
+    # lattices is of shape (b, 3, 3)
+    # frac_coords is of shape (b, n, 3)
+    if regularized:
+        frac_coords = frac_coords % 1.
+    pos = torch.einsum('bij,bjk->bik', frac_coords, lattices)  # cart coords of shape (b, n, 3)
+
+    return pos
+
+
+def cart_to_frac_coords(
+    cart_coords,
+    lattices,
+    regularized = True
+):
+    # use pinv in case the predicted lattice is not rank 3
+    inv_lattices = torch.linalg.pinv(lattices)
+    frac_coords = torch.einsum('bij,bjk->bik', cart_coords, inv_lattices)
+    if regularized:
+        frac_coords = frac_coords % 1.
+    return frac_coords

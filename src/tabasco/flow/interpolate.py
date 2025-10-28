@@ -353,6 +353,216 @@ class CenteredMetricInterpolant(Interpolant):
 
         return x_new
 
+class LatticeInterpolant(Interpolant):
+    """Linear interpolation between two points in Euclidean space.
+
+    This class teaches the model to predict the endpoint of the path.
+    """
+
+    def __init__(
+        self,
+        noise_scale: float = 1.0,
+        **kwargs,
+    ):
+        """Initialize the metric interpolant.
+
+        Args:
+            centered: If True, subtract center-of-mass so translation is ignored.
+            scale_noise_by_log_num_atoms: Scale noise amplitude by `log(N_atoms)`.
+            noise_scale: Standard deviation of the sampled Gaussian noise.
+            **kwargs: Forwarded to `Interpolant.__init__`.
+        """
+        super().__init__(**kwargs)
+        self.mse_loss = nn.MSELoss(reduction="none")
+        self.noise_scale = noise_scale
+
+    def sample_noise(self, shape: torch.Size, device: torch.device) -> TensorDict:
+        """Return masked Gaussian noise with optional scaling.
+
+        Args:
+            shape: Desired output shape.
+            pad_mask: Padding mask.
+
+        Returns:
+            Tensor: Noise tensor.
+        """
+        x_0 = torch.randn(shape).to(device) * self.noise_scale
+
+        return x_0
+
+    def create_path(
+        self, x_1: Tensor, t: Tensor, x_0: Optional[TensorDict] = None
+    ) -> FlowPath:
+        """Generate `(x_0, x_t, dx_t)` via linear interpolation in Euclidean space."""
+
+        if x_0 is None:
+            x_0_tensor = self.sample_noise(x_1[self.key].shape, x_1[self.key].device)
+        else:
+            x_0_tensor = x_0[self.key]
+
+        t = t.unsqueeze(-1).unsqueeze(-1)
+        assert t.shape == (x_1[self.key].shape[0], 1, 1), (
+            f"t shape: {t.shape} != {(x_1[self.key].shape[0], 1, 1)}"
+        )
+
+        x_1_tensor = x_1[self.key]
+        x_t = (1.0 - t) * x_0_tensor + t * x_1_tensor
+        dx_t = x_1_tensor - x_0_tensor
+        return x_0_tensor, x_t, dx_t
+
+    def compute_loss(
+        self, path: FlowPath, pred: TensorDict, compute_stats: bool = True
+    ) -> Tensor:
+        """Mean-squared error on masked coordinates with optional time weighting."""
+
+        err = (pred[self.key] - path.x_1[self.key])
+        loss = torch.sum(err**2, dim=(-1, -2)) / (err.shape[-1])
+
+        if self.time_factor:
+            loss = loss * self.time_factor(path.t)
+
+        if compute_stats:
+            binned_losses = split_losses_by_time(path.t, loss, 5)
+            stats_dict = {
+                **{
+                    f"lattices_loss_bin_{i}": loss for i, loss in enumerate(binned_losses)
+                },
+            }
+        else:
+            stats_dict = {}
+
+        total_loss = loss.mean() * self.loss_weight
+        return total_loss, stats_dict
+
+    def step(self, batch_t: TensorDict, pred: TensorDict, t: Tensor, dt: float):
+        """Deterministic forward-Euler step for continuous coordinates."""
+
+        t = t.unsqueeze(-1).unsqueeze(-1)
+        dt = dt.unsqueeze(-1).unsqueeze(-1)
+        assert dt.shape == t.shape == (batch_t[self.key].shape[0], 1, 1), (
+            f"t shape: {t.shape}, dt shape: {dt.shape}, batch_t shape: {batch_t[self.key].shape}"
+        )
+
+        x1_pred = pred[self.key]
+        velocity = (x1_pred - batch_t[self.key]) / (1 - t)
+
+        x_new = batch_t[self.key] + velocity * dt
+
+        assert x_new.shape == batch_t[self.key].shape, (
+            f"x_new shape: {x_new.shape} != {batch_t[self.key].shape}"
+        )
+
+        return x_new
+
+class Torus01Interpolant(Interpolant):
+    """Interpolates between two points on the torus."""
+
+    def __init__(
+        self,
+        centered: bool = True,
+        scale_noise_by_log_num_atoms: bool = False,
+        noise_scale: float = 1.0,
+        **kwargs,
+    ):
+        """Initialize the metric interpolant.
+
+        Args:
+            centered: If True, subtract center-of-mass so translation is ignored.
+            scale_noise_by_log_num_atoms: Scale noise amplitude by `log(N_atoms)`.
+            noise_scale: Standard deviation of the sampled Gaussian noise.
+            **kwargs: Forwarded to `Interpolant.__init__`.
+        """
+        super().__init__(**kwargs)
+        self.mse_loss = nn.MSELoss(reduction="none")
+        self.centered = centered
+        self.scale_noise_by_log_num_atoms = scale_noise_by_log_num_atoms
+        self.noise_scale = noise_scale
+
+    def sample_noise(self, shape: torch.Size, pad_mask: Tensor) -> TensorDict:
+        """Return masked Gaussian noise with optional scaling.
+
+        Args:
+            shape: Desired output shape.
+            pad_mask: Padding mask.
+
+        Returns:
+            Tensor: Noise tensor.
+        """
+        x_0 = (torch.rand(shape).to(pad_mask.device) - 0.5) * self.noise_scale
+        x_0 = apply_mask(x_0, pad_mask)
+
+        return x_0
+
+    def create_path(
+        self, x_1: Tensor, t: Tensor, x_0: Optional[TensorDict] = None
+    ) -> FlowPath:
+        """Generate `(x_0, x_t, dx_t)` via linear interpolation in Euclidean space."""
+
+        if x_0 is None:
+            x_0_tensor = self.sample_noise(x_1[self.key].shape, x_1[self.key_pad_mask])
+        else:
+            x_0_tensor = x_0[self.key]
+
+        t = t.unsqueeze(-1).unsqueeze(-1)
+        assert t.shape == (x_1[self.key].shape[0], 1, 1), (
+            f"t shape: {t.shape} != {(x_1[self.key].shape[0], 1, 1)}"
+        )
+
+        # x_0_tensor = mask_and_zero_com(x_0_tensor, x_1[self.key_pad_mask])
+        x_1_tensor = apply_mask(x_1[self.key], x_1[self.key_pad_mask])
+
+        x_t = (1.0 - t) * x_0_tensor + t * x_1_tensor 
+        dx_t = x_1_tensor - x_0_tensor
+
+        return x_0_tensor, x_t, dx_t
+
+    def compute_loss(
+        self, path: FlowPath, pred: TensorDict, compute_stats: bool = True
+    ) -> Tensor:
+        """Mean-squared error on masked coordinates with optional time weighting."""
+
+        real_mask = 1 - path.x_1[self.key_pad_mask].int()
+        n_atoms = real_mask.sum(dim=-1)
+
+        err = (pred[self.key] - path.x_1[self.key]) * real_mask.unsqueeze(-1)
+        loss = torch.sum(err**2, dim=(-1, -2)) / (n_atoms * err.shape[-1])
+
+        if self.time_factor:
+            loss = loss * self.time_factor(path.t)
+
+        if compute_stats:
+            binned_losses = split_losses_by_time(path.t, loss, 5)
+            stats_dict = {
+                **{
+                    f"frac_coords_loss_bin_{i}": loss for i, loss in enumerate(binned_losses)
+                },
+            }
+        else:
+            stats_dict = {}
+
+        total_loss = loss.mean() * self.loss_weight
+        return total_loss, stats_dict
+
+    def step(self, batch_t: TensorDict, pred: TensorDict, t: Tensor, dt: float):
+        """Deterministic forward-Euler step for continuous coordinates."""
+
+        t = t.unsqueeze(-1).unsqueeze(-1)
+        dt = dt.unsqueeze(-1).unsqueeze(-1)
+        assert dt.shape == t.shape == (batch_t[self.key].shape[0], 1, 1), (
+            f"t shape: {t.shape}, dt shape: {dt.shape}, batch_t shape: {batch_t[self.key].shape}"
+        )
+
+        x1_pred = pred[self.key]
+        velocity = (x1_pred - batch_t[self.key]) / (1 - t)
+
+        x_new = batch_t[self.key] + velocity * dt
+        x_new = apply_mask(x_new, batch_t[self.key_pad_mask])
+
+        assert x_new.shape == batch_t[self.key].shape, (
+            f"x_new shape: {x_new.shape} != {batch_t[self.key].shape}"
+        )
+
+        return x_new
 
 class SDEMetricInterpolant(CenteredMetricInterpolant):
     """CenteredMetricInterpolant with Langevin/SDE-style sampling based on the proteina paper."""
