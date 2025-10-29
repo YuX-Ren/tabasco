@@ -30,6 +30,7 @@ class TransformerModule(nn.Module):
         concat_combine_input: bool = False,
         custom_weight_init: Optional[str] = None,
         levels: list[int] = [4, 4, 4, 4, 4, 4],
+        train_materials: bool = False,
     ):
         """
         Args:
@@ -53,7 +54,7 @@ class TransformerModule(nn.Module):
         self.concat_combine_input = concat_combine_input
         self.custom_weight_init = custom_weight_init
         print(f"Implementation: {self.implementation}")
-
+        self.train_materials = train_materials
         self.cond_embed = nn.Embedding(2, hidden_dim)
 
         self.enc_linear_embed = nn.Linear(spatial_dim, hidden_dim, bias=False)
@@ -61,7 +62,8 @@ class TransformerModule(nn.Module):
 
         self.linear_embed = nn.Linear(spatial_dim, hidden_dim, bias=False)
         self.atom_type_embed = nn.Embedding(atom_dim, hidden_dim)
-
+        if self.train_materials:
+            self.lattice_embed = nn.Linear(3, hidden_dim, bias=False)
         if self.add_sinusoid_posenc:
             self.positional_encoding = SinusoidEncoding(
                 posenc_dim=hidden_dim, max_len=90
@@ -125,7 +127,11 @@ class TransformerModule(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, spatial_dim, bias=False),
         )
-
+        if self.train_materials:
+            self.lattice_linear = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, 3, bias=False),
+            )
         self.out_atom_type_linear = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(inplace=False),
@@ -149,6 +155,14 @@ class TransformerModule(nn.Module):
                 batch_first=True,
                 norm_first=True,
             )
+            if self.train_materials:
+                self.lattice_cross_attention = nn.TransformerDecoderLayer(
+                    d_model=hidden_dim,
+                    nhead=num_heads,
+                    dim_feedforward=hidden_dim * 4,
+                    batch_first=True,
+                    norm_first=True,
+                )
 
         self._atom_size_tuples = []
 
@@ -192,89 +206,111 @@ class TransformerModule(nn.Module):
         quant_embed = self.quant_conv_out(encode_embed)
         return quant_embed
 
-    def forward(self, coord_ori, atomics_ori, padding_mask, coord_t, atomics_t, t, mode = "val") -> Tensor:
-        """Forward pass of the module."""
-
+    def forward(self, coord_ori, atomics_ori, padding_mask, coord_t, atomics_t, t, lattices=None, mode="val") -> Tensor:
+        """Forward pass of the module. Compatible: if self.train_materials is False, behavior equals the second version."""
+        seq_len = coord_t.shape[1]
         real_mask = 1 - padding_mask.int()
+
+        # If materials are trained, extend lengths by 3; otherwise keep seq_len
+        if self.train_materials:
+            dec_seq_len = seq_len + 3
+        else:
+            dec_seq_len = seq_len
+
+        # build masks conditionally (only append 3 tokens if train_materials=True)
+        if self.train_materials:
+            dec_real_mask = torch.cat([real_mask, torch.ones(coord_t.shape[0], 3, device=padding_mask.device, dtype=real_mask.dtype)], dim=1)
+        else:
+            dec_real_mask = real_mask
 
         embed_coords = self.linear_embed(coord_t)
         embed_atom_types = self.atom_type_embed(atomics_t.argmax(dim=-1))
 
-        if self.add_sinusoid_posenc:
-            embed_posenc = self.positional_encoding(
-                batch_size=coord_t.shape[0], seq_len=coord_t.shape[1]
-            )
-        else:
-            embed_posenc = torch.zeros(
-                coord_t.shape[0], coord_t.shape[1], self.hidden_dim
-            ).to(coord_t.device)
+        if self.train_materials:
+            embed_lattices = self.lattice_embed(lattices)
 
-        encode_embed = self.encode(coord_ori, atomics_ori, padding_mask) * real_mask.unsqueeze(-1) + embed_posenc * real_mask.unsqueeze(-1)
+        # positional encoding: always generate length dec_seq_len, but when not training materials, dec_seq_len==seq_len
+        if self.add_sinusoid_posenc:
+            embed_posenc = self.positional_encoding(batch_size=coord_t.shape[0], seq_len=dec_seq_len) * dec_real_mask.unsqueeze(-1)
+        else:
+            embed_posenc = torch.zeros(coord_t.shape[0], dec_seq_len, self.hidden_dim, device=coord_t.device)
+
+        # encode_embed uses only the first seq_len positions of embed_posenc
+        encode_embed = self.encode(coord_ori, atomics_ori, padding_mask) * real_mask.unsqueeze(-1) + embed_posenc[:, :seq_len, :] * real_mask.unsqueeze(-1)
 
         embed_time = self.time_encoding(t).unsqueeze(1)
 
-        assert embed_posenc.shape == embed_coords.shape == embed_atom_types.shape, (
-            f"embed_posenc.shape: {embed_posenc.shape}, embed_coords.shape: {embed_coords.shape}, embed_atom_types.shape: {embed_atom_types.shape}"
-        )
-
-        if self.concat_combine_input:
-            embed_time = embed_time.repeat(1, coord_t.shape[1], 1)
-            h_in = torch.cat(
-                [embed_coords, embed_atom_types, embed_posenc, embed_time], dim=-1
-            )
-            assert h_in.shape == (
-                coord_t.shape[0],
-                coord_t.shape[1],
-                4 * self.hidden_dim,
-            ), f"h_in.shape: {h_in.shape}"
-            h_in = self.combine_input(h_in)
-            assert h_in.shape == (coord_t.shape[0], coord_t.shape[1], self.hidden_dim), (
-                f"h_in.shape: {h_in.shape}"
-            )
+        # Build h_in: include lattices only if train_materials=True
+        if self.train_materials:
+            h_in_atoms = embed_coords + embed_atom_types
+            h_in = torch.cat([h_in_atoms, embed_lattices], dim=1) + embed_posenc + embed_time
         else:
+            # here embed_posenc has length seq_len (dec_seq_len==seq_len)
             h_in = embed_coords + embed_atom_types + embed_posenc + embed_time
-        h_in = h_in * real_mask.unsqueeze(-1)
-        # h_in = h_in + encode_embed
-        h_in = torch.cat( [h_in, encode_embed], dim=1)
+
+        # Apply mask that matches h_in length (dec_real_mask is consistent with dec_seq_len)
+        h_in = h_in * dec_real_mask.unsqueeze(-1)
+
+        # concatenate encode_embed (length seq_len)
+        h_in = torch.cat([h_in, encode_embed], dim=1)
+
+        # construct cond_pos aligned to actual sequence lengths
         cond_pos = torch.cat(
-                (
-                    torch.zeros(coord_t.shape[0], coord_t.shape[1], dtype=torch.long, device=coord_t.device),
-                    torch.ones(coord_t.shape[0], coord_t.shape[1], dtype=torch.long, device=coord_t.device),
-                ),
-                dim=-1,
-            )
+            (
+                torch.zeros(coord_t.shape[0], dec_seq_len, dtype=torch.long, device=coord_t.device),
+                torch.ones(coord_t.shape[0], seq_len, dtype=torch.long, device=coord_t.device),
+            ),
+            dim=-1,
+        )
         h_in = h_in + self.cond_embed(cond_pos)
-        
+
+        # build padding mask that matches h_in length
+        if self.train_materials:
+            dec_padding_mask = torch.cat([padding_mask, torch.zeros(coord_t.shape[0], 3, device=padding_mask.device)], dim=1)
+        else:
+            dec_padding_mask = padding_mask
+
+        # transformer expects a padding mask of length left_len + seq_len, which equals h_in.shape[1]
+        full_padding_mask = torch.cat([dec_padding_mask, padding_mask], dim=1)
+
         if self.implementation == "pytorch":
-            h_out = self.transformer(h_in, src_key_padding_mask=torch.cat( [padding_mask, padding_mask], dim=1))
+            h_out = self.transformer(h_in, src_key_padding_mask=full_padding_mask)
         elif self.implementation == "reimplemented":
-            h_out = self.transformer(h_in, padding_mask=torch.cat( [padding_mask, padding_mask], dim=1))
+            h_out = self.transformer(h_in, padding_mask=full_padding_mask)
 
-        # load the half of the input to the output
-        seq_len = coord_t.shape[1]
-        h_out = h_out[:, :seq_len, :]
-        h_out = h_out * real_mask.unsqueeze(-1)
+        # keep only the decoder part
+        h_out = h_out[:, :dec_seq_len, :]
+        h_out = h_out * dec_real_mask.unsqueeze(-1)
 
+        # compute coords / atom_logits like original
         if self.cross_attention:
             h_coord = self.coord_cross_attention(
-                h_out,
+                h_out[:, :seq_len, :],
                 h_in[:, :seq_len, :],
                 tgt_key_padding_mask=padding_mask,
                 memory_key_padding_mask=padding_mask,
             )
             coords = self.out_coord_linear(h_coord)
         else:
-            coords = self.out_coord_linear(h_out)
+            coords = self.out_coord_linear(h_out[:, :seq_len, :])
 
         if self.cross_attention:
             h_atom = self.atom_cross_attention(
-                h_out,
+                h_out[:, :seq_len, :],
                 h_in[:, :seq_len, :],
                 tgt_key_padding_mask=padding_mask,
                 memory_key_padding_mask=padding_mask,
             )
             atom_logits = self.out_atom_type_linear(h_atom)
         else:
-            atom_logits = self.out_atom_type_linear(h_out)
+            atom_logits = self.out_atom_type_linear(h_out[:, :seq_len, :])
 
+        if self.train_materials:
+            if self.cross_attention:
+                h_lattice = self.lattice_cross_attention(
+                    h_out[:, seq_len:, :],
+                    h_in[:, seq_len:, :],
+                )
+                lattices = self.lattice_linear(h_lattice)
+            return coords, atom_logits, lattices
         return coords, atom_logits
