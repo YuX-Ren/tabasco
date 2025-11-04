@@ -58,10 +58,13 @@ class TransformerModule(nn.Module):
         self.cond_embed = nn.Embedding(2, hidden_dim)
 
         self.enc_linear_embed = nn.Linear(spatial_dim, hidden_dim, bias=False)
-        self.enc_atom_type_embed = nn.Embedding(atom_dim, hidden_dim)
+        self.enc_atom_type_embed = nn.Embedding(atom_dim + 1, hidden_dim) # + 1 for the pesudo lattice token
+        self.lattice_token = atom_dim
+        if self.train_materials:
+            self.enc_lattice_embed = nn.Linear(3, hidden_dim, bias=False)
 
         self.linear_embed = nn.Linear(spatial_dim, hidden_dim, bias=False)
-        self.atom_type_embed = nn.Embedding(atom_dim, hidden_dim)
+        self.atom_type_embed = nn.Embedding(atom_dim + 1, hidden_dim) # + 1 for the pesudo lattice token
         if self.train_materials:
             self.lattice_embed = nn.Linear(3, hidden_dim, bias=False)
         if self.add_sinusoid_posenc:
@@ -191,11 +194,17 @@ class TransformerModule(nn.Module):
                         f"Invalid custom weight init: {self.custom_weight_init}"
                     )
 
-    def encode(self, coord_ori, atomics_ori, padding_mask):
+    def encode(self, coord_ori, atomics_ori, padding_mask, lattices_ori=None):
         """Encode the input."""
         embed_coords = self.enc_linear_embed(coord_ori)
         embed_atom_types = self.enc_atom_type_embed(atomics_ori.argmax(dim=-1))
+        if self.train_materials:
+            embed_lattices_pos = self.enc_lattice_embed(lattices_ori)
+            embed_pesudo_atoms = self.enc_atom_type_embed(torch.ones(embed_lattices_pos.shape[0], embed_lattices_pos.shape[1], device=embed_lattices_pos.device, dtype=torch.long) * self.lattice_token)
+            embed_lattices = embed_lattices_pos + embed_pesudo_atoms
         h_in = embed_coords + embed_atom_types
+        if self.train_materials:
+            h_in = torch.cat([embed_lattices,h_in], dim=1)
         if self.implementation == "pytorch":
             encode_embed = self.enc_transformer(h_in, src_key_padding_mask=padding_mask)
         elif self.implementation == "reimplemented":
@@ -206,7 +215,7 @@ class TransformerModule(nn.Module):
         quant_embed = self.quant_conv_out(encode_embed)
         return quant_embed
 
-    def forward(self, coord_ori, atomics_ori, padding_mask, coord_t, atomics_t, t, lattices=None, mode="val") -> Tensor:
+    def forward(self, coord_ori, atomics_ori, padding_mask, coord_t, atomics_t, t, lattices_ori=None, lattices_t=None, mode="val") -> Tensor:
         """Forward pass of the module. Compatible: if self.train_materials is False, behavior equals the second version."""
         seq_len = coord_t.shape[1]
         real_mask = 1 - padding_mask.int()
@@ -217,9 +226,14 @@ class TransformerModule(nn.Module):
         else:
             dec_seq_len = seq_len
 
+        # build padding mask that matches h_in length
+        if self.train_materials:
+            dec_padding_mask = torch.cat([padding_mask, torch.zeros(coord_t.shape[0], 3, device=padding_mask.device)], dim=1)
+        else:
+            dec_padding_mask = padding_mask
         # build masks conditionally (only append 3 tokens if train_materials=True)
         if self.train_materials:
-            dec_real_mask = torch.cat([real_mask, torch.ones(coord_t.shape[0], 3, device=padding_mask.device, dtype=real_mask.dtype)], dim=1)
+            dec_real_mask = torch.cat([torch.ones(coord_t.shape[0], 3, device=padding_mask.device, dtype=real_mask.dtype), real_mask], dim=1)
         else:
             dec_real_mask = real_mask
 
@@ -227,8 +241,9 @@ class TransformerModule(nn.Module):
         embed_atom_types = self.atom_type_embed(atomics_t.argmax(dim=-1))
 
         if self.train_materials:
-            embed_lattices = self.lattice_embed(lattices)
-
+            embed_lattices_pos = self.lattice_embed(lattices_t)
+            embed_pesudo_atoms = self.atom_type_embed(torch.ones(embed_lattices_pos.shape[0], embed_lattices_pos.shape[1], device=embed_lattices_pos.device, dtype=torch.long) * self.lattice_token)
+            embed_lattices = embed_lattices_pos + embed_pesudo_atoms
         # positional encoding: always generate length dec_seq_len, but when not training materials, dec_seq_len==seq_len
         if self.add_sinusoid_posenc:
             embed_posenc = self.positional_encoding(batch_size=coord_t.shape[0], seq_len=dec_seq_len) * dec_real_mask.unsqueeze(-1)
@@ -236,14 +251,17 @@ class TransformerModule(nn.Module):
             embed_posenc = torch.zeros(coord_t.shape[0], dec_seq_len, self.hidden_dim, device=coord_t.device)
 
         # encode_embed uses only the first seq_len positions of embed_posenc
-        encode_embed = self.encode(coord_ori, atomics_ori, padding_mask) * real_mask.unsqueeze(-1) + embed_posenc[:, :seq_len, :] * real_mask.unsqueeze(-1)
+        if self.train_materials:
+            encode_embed = self.encode(coord_ori, atomics_ori, dec_padding_mask, lattices_ori) * dec_real_mask.unsqueeze(-1) + embed_posenc * dec_real_mask.unsqueeze(-1)
+        else:
+            encode_embed = self.encode(coord_ori, atomics_ori, padding_mask) * real_mask.unsqueeze(-1) + embed_posenc * real_mask.unsqueeze(-1)
 
         embed_time = self.time_encoding(t).unsqueeze(1)
 
         # Build h_in: include lattices only if train_materials=True
         if self.train_materials:
             h_in_atoms = embed_coords + embed_atom_types
-            h_in = torch.cat([h_in_atoms, embed_lattices], dim=1) + embed_posenc + embed_time
+            h_in = torch.cat([embed_lattices, h_in_atoms], dim=1) + embed_posenc + embed_time
         else:
             # here embed_posenc has length seq_len (dec_seq_len==seq_len)
             h_in = embed_coords + embed_atom_types + embed_posenc + embed_time
@@ -258,20 +276,16 @@ class TransformerModule(nn.Module):
         cond_pos = torch.cat(
             (
                 torch.zeros(coord_t.shape[0], dec_seq_len, dtype=torch.long, device=coord_t.device),
-                torch.ones(coord_t.shape[0], seq_len, dtype=torch.long, device=coord_t.device),
+                torch.ones(coord_t.shape[0], dec_seq_len, dtype=torch.long, device=coord_t.device),
             ),
             dim=-1,
         )
         h_in = h_in + self.cond_embed(cond_pos)
 
-        # build padding mask that matches h_in length
-        if self.train_materials:
-            dec_padding_mask = torch.cat([padding_mask, torch.zeros(coord_t.shape[0], 3, device=padding_mask.device)], dim=1)
-        else:
-            dec_padding_mask = padding_mask
+
 
         # transformer expects a padding mask of length left_len + seq_len, which equals h_in.shape[1]
-        full_padding_mask = torch.cat([dec_padding_mask, padding_mask], dim=1)
+        full_padding_mask = torch.cat([dec_padding_mask, dec_padding_mask], dim=1)
 
         if self.implementation == "pytorch":
             h_out = self.transformer(h_in, src_key_padding_mask=full_padding_mask)
@@ -285,31 +299,31 @@ class TransformerModule(nn.Module):
         # compute coords / atom_logits like original
         if self.cross_attention:
             h_coord = self.coord_cross_attention(
-                h_out[:, :seq_len, :],
-                h_in[:, :seq_len, :],
+                h_out[:, 3:dec_seq_len, :],
+                h_in[:, 3:dec_seq_len, :],
                 tgt_key_padding_mask=padding_mask,
                 memory_key_padding_mask=padding_mask,
             )
             coords = self.out_coord_linear(h_coord)
         else:
-            coords = self.out_coord_linear(h_out[:, :seq_len, :])
+            coords = self.out_coord_linear(h_out[:, 3:dec_seq_len, :])
 
         if self.cross_attention:
             h_atom = self.atom_cross_attention(
-                h_out[:, :seq_len, :],
-                h_in[:, :seq_len, :],
+                h_out[:, 3:dec_seq_len, :],
+                h_in[:, 3:dec_seq_len, :],
                 tgt_key_padding_mask=padding_mask,
                 memory_key_padding_mask=padding_mask,
             )
             atom_logits = self.out_atom_type_linear(h_atom)
         else:
-            atom_logits = self.out_atom_type_linear(h_out[:, :seq_len, :])
+            atom_logits = self.out_atom_type_linear(h_out[:, 3:dec_seq_len, :])
 
         if self.train_materials:
             if self.cross_attention:
                 h_lattice = self.lattice_cross_attention(
-                    h_out[:, seq_len:, :],
-                    h_in[:, seq_len:, :],
+                    h_out[:, :3, :],
+                    h_in[:, :3, :],
                 )
                 lattices = self.lattice_linear(h_lattice)
             return coords, atom_logits, lattices

@@ -88,7 +88,8 @@ class FlowMatchingModel(nn.Module):
         if self.train_materials:
             coords, atom_logits, lattices = self.net(
                 batch_ori["coords"], batch_ori["atomics"], batch_ori["padding_mask"],batch_t["coords"], batch_t["atomics"], t,
-                lattices = batch_t["lattices"],
+                lattices_ori = batch_ori["lattices"],
+                lattices_t = batch_t["lattices"],
             )
         else:
             coords, atom_logits = self.net(
@@ -287,8 +288,9 @@ class FlowMatchingModel(nn.Module):
             return_trajectories: If True, also return intermediate snapshots.
         """
         if self.train_materials:
-            num_atoms = (~batch["padding_mask"]).sum(dim=-1)
+            num_atoms = (~batch["padding_mask"]).sum(dim=-1).unsqueeze(-1).unsqueeze(-1)
             batch["lattices"] = batch["lattices"] / num_atoms**(1/3)
+            batch["coords"] = (batch["coords"] + 0.5) % 1.0 - 0.5
         x_t = self._sample_noise_like_batch(batch, batch_size)
         if return_trajectories:
             trajectories = []
@@ -305,8 +307,11 @@ class FlowMatchingModel(nn.Module):
             if return_trajectories:
                 trajectories.append(deepcopy(x_t.detach().cpu()))
         if self.train_materials:
-            num_atoms = (~x_t["padding_mask"]).sum(dim=-1)
+            num_atoms = (~x_t["padding_mask"]).sum(dim=-1).unsqueeze(-1).unsqueeze(-1)
             x_t["lattices"] = x_t["lattices"] * num_atoms**(1/3)
+            batch["lattices"] = batch["lattices"] * num_atoms**(1/3)
+            # x_t["coords"] = x_t["coords"] % 1.0 
+            # batch["coords"] = batch["coords"] % 1.0 
         if return_trajectories:
             return x_t, trajectories
 

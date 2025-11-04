@@ -12,20 +12,65 @@ torch.set_float32_matmul_precision("high")
 L.seed_everything(42)
 import numpy as np
 import tqdm
-
+from pymatgen.analysis.structure_matcher import StructureMatcher
+from tabasco.chem.crystal_matcher import array_dict_to_crystal
 # Manually setting the configuration dictionary (cfg)
 cfg = {
-    "data_dir": "./data/processed_qm9_train.pt",
-    "val_data_dir": "./data/processed_qm9_val.pt",
-    "test_data_dir": "./data/processed_qm9_test.pt",
-    "lmdb_dir": "./data/lmdb_qm9",
+    "data_dir": "./data/processed_mp20_train.pt",
+    "val_data_dir": "./data/processed_mp20_val.pt",
+    "test_data_dir": "./data/processed_mp20_test.pt",
+    "lmdb_dir": "./data/lmdb_mp_20",
     "add_random_rotation": True,
     "add_random_permutation": False,
     "reorder_to_smiles_order": True,
     "remove_hydrogens": True,
     "batch_size": 256,
-    "num_workers": 0
+    "num_workers": 0,
+    "train_materials": True
 }
+
+def batch_frac_to_cart_coords_with_lattice(
+    frac_coords: torch.Tensor, lattice: torch.Tensor
+) -> torch.Tensor:
+    num_atoms = frac_coords.shape[1]
+    lattice_nodes = torch.repeat_interleave(lattice.unsqueeze(1), num_atoms, dim=1)
+    pos = torch.einsum("bni,bnij->bnj", frac_coords, lattice_nodes)  # cart coords
+    return pos
+
+def abs_cap(val, max_abs_val=1):
+    """
+    Returns the value with its absolute value capped at max_abs_val.
+    Particularly useful in passing values to trignometric functions where
+    numerical errors may result in an argument > 1 being passed in.
+    https://github.com/materialsproject/pymatgen/blob/b789d74639aa851d7e5ee427a765d9fd5a8d1079/pymatgen/util/num.py#L15
+    Args:
+        val (float): Input value.
+        max_abs_val (float): The maximum absolute value for val. Defaults to 1.
+    Returns:
+        val if abs(val) < 1 else sign of val * max_abs_val.
+    """
+    return max(min(val, max_abs_val), -max_abs_val)
+
+def lattice_matrix_to_params(matrix):
+    lengths = np.sqrt(np.sum(matrix ** 2, axis=1))
+
+    angles = np.zeros(3)
+    for i in range(3):
+        j = (i + 1) % 3
+        k = (i + 2) % 3
+        angles[i] = abs_cap(np.dot(matrix[j], matrix[k]) /
+                            (lengths[j] * lengths[k]))
+    angles = np.arccos(angles) * 180.0 / np.pi
+    return lengths, angles
+
+def compute_volume(batch_lattice):
+    """Compute volume from batched lattice matrix
+
+    batch_lattice: (N, 3, 3)
+    """
+    vector_a, vector_b, vector_c = torch.unbind(batch_lattice, dim=1)
+    return torch.abs(torch.einsum('bi,bi->b', vector_a,
+                                  torch.cross(vector_b, vector_c, dim=1)))
 
 def kabsch_algorithm(P, Q):
     """
@@ -65,7 +110,7 @@ def kabsch_algorithm(P, Q):
     
     return R, aligned_Q
 
-def compute_rmsd_with_kabsch(batch, out_batch):
+def compute_rmsd_with_kabsch(batch, out_batch, materials_match = False):
     """
     Compute the RMSD with Kabsch alignment, ignoring padded atoms.
     
@@ -77,6 +122,10 @@ def compute_rmsd_with_kabsch(batch, out_batch):
     """
     coords_ref = batch["coords"]
     coords_gen = out_batch["coords"]
+    lattices_ref = batch["lattices"]
+    lattices_gen = out_batch["lattices"]
+    coords_ref = batch_frac_to_cart_coords_with_lattice(coords_ref, lattices_ref)
+    coords_gen = batch_frac_to_cart_coords_with_lattice(coords_gen, lattices_gen)
     real_mask = ~out_batch["padding_mask"]  # ~mask to get True for valid atoms
 
     # Ensure coordinates are on the same device (e.g., CUDA)
@@ -102,6 +151,8 @@ def compute_rmsd_with_kabsch(batch, out_batch):
             per_molecule_rmsd = np.sqrt(np.mean(sq_diff))
             # print(per_molecule_rmsd)
             # Accumulate RMSD over all molecules
+            if materials_match:
+                per_molecule_rmsd = per_molecule_rmsd * (len(ref_coords) / compute_volume(lattices_ref[i])) ** (1/3)
             rmsds += per_molecule_rmsd.item()
             
     # Return average RMSD over all valid molecules in the batch
@@ -198,6 +249,7 @@ def parse_args():
 
 def main():
     """Main entry-point: parse args, load model, sample, export."""
+    matcher = StructureMatcher(stol=0.2, angle_tol=5, ltol=0.2)
     args = parse_args()
     num_mols = args.num_mols
     num_steps = args.num_steps
@@ -231,6 +283,7 @@ def main():
     # Sampling from validation data loader
     rmsds = 0
     num_graphs = 0
+    idx = 0
     for batch in tqdm.tqdm(datamodule.test_dataloader()):
         batch = batch.to("cuda")
         out_batch = sample_batch(
@@ -240,6 +293,35 @@ def main():
             num_steps=num_steps,
         )
         out_batch_list.append(out_batch)
+
+        # for out_mol, batch_mol in zip(out_batch, batch):
+        #     try:
+        #         out_atom_types = lightning_module.mol_converter.get_atom_types_from_tensor(out_mol)
+        #         batch_atom_types = lightning_module.mol_converter.get_atom_types_from_tensor(batch_mol)
+        #         if out_atom_types != batch_atom_types:
+        #             print(f"out atom types: {out_atom_types}, batch atom types: {batch_atom_types}")
+        #         lengths, angles = lattice_matrix_to_params(batch_mol["lattices"].detach().cpu().numpy())
+        #         batch_mol = array_dict_to_crystal({
+        #             "atom_types": np.array(batch_atom_types),
+        #             "frac_coords": batch_mol["coords"][~batch_mol["padding_mask"]].detach().cpu().numpy(),
+        #             "lengths": lengths,
+        #             "angles": angles,
+        #             "sample_idx": idx,
+        #         })
+        #         out_lengths, out_angles = lattice_matrix_to_params(out_mol["lattices"].detach().cpu().numpy())
+        #         out_mol = array_dict_to_crystal({
+        #             "atom_types": np.array(out_atom_types),
+        #             "frac_coords": out_mol["coords"][~out_mol["padding_mask"]].detach().cpu().numpy(),
+        #             "lengths": out_lengths,
+        #             "angles": out_angles,
+        #             "sample_idx": idx,
+        #         })
+        #         rmsd = matcher.get_rms_dist(batch_mol.structure, out_mol.structure)
+        #         print(f"rmsd: {rmsd}")
+        #     except Exception as e:
+        #         print(f"error: {e}")
+
+
         # calculate the rmsd between the generated and reference molecules
         # for mol, target_mol in zip(batch,out_batch):
         per_batch_rmsd = compute_rmsd_with_kabsch(batch, out_batch)
@@ -252,15 +334,19 @@ def main():
         for out_mol, batch_mol in zip(out_batch, batch):
             out_atom_types = lightning_module.mol_converter.get_atom_types_from_tensor(out_mol)
             batch_atom_types = lightning_module.mol_converter.get_atom_types_from_tensor(batch_mol)
+            print(f"out atom types: {out_atom_types},\n batch atom types: {batch_atom_types}\n\n",file=open("atom_types.txt", "a"))
             if out_atom_types != batch_atom_types:
                 print(f"out atom types: {out_atom_types}, batch atom types: {batch_atom_types}")
-        break
+        # break
     # rmsds /= len(datamodule.test_dataloader())
     rmsd = rmsds/num_graphs
     print(f"rmsd: {rmsd}")
     mse = out_batch["coords"] - batch["coords"]
     mse = mse.pow(2).mean()
     print(f"mse: {mse}")
+    lattice_mse = out_batch["lattices"] - batch["lattices"]
+    lattice_mse = lattice_mse.pow(2).mean()
+    print(f"lattice_mse: {lattice_mse}")
     # compare the generated and reference molecules by atom type
 
     # Concatenate results from all batches

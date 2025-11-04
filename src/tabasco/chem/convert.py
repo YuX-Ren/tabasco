@@ -13,7 +13,7 @@ from torch import Tensor
 import tempfile
 
 from tabasco.chem.utils import attempt_sanitize, write_xyz_file
-from tabasco.chem.constants import ATOM_COLOR_MAP, ATOM_NAMES
+from tabasco.chem.constants import ATOM_COLOR_MAP, ATOM_NAMES, CHEMICAL_SYMBOLS
 from tabasco.data.utils import batch_to_list
 from tabasco.utils import RankedLogger
 from rdkit import RDLogger
@@ -31,7 +31,7 @@ class MoleculeConverter:
 
     def __init__(
         self,
-        atom_names=ATOM_NAMES,
+        atom_names=CHEMICAL_SYMBOLS,
         atom_color_map=ATOM_COLOR_MAP,
         dataset_normalizer=2.0,
     ):
@@ -43,7 +43,7 @@ class MoleculeConverter:
         """
         self._atom_types = atom_names
         self._mol_colors = list(atom_color_map.values())
-        self._dummy_atom_idx = self._atom_types.index("*")
+        self._dummy_atom_idx = self._atom_types.index("X")
 
         # TODO: refactor: make this a param and rename to smth better
         self.dataset_normalizer = dataset_normalizer
@@ -69,6 +69,7 @@ class MoleculeConverter:
         if padding_mask is not None:
             atomics = atomics[~padding_mask]
 
+        # return [int(i) for i in torch.argmax(atomics, dim=1)]
         return [self._atom_types[i] for i in torch.argmax(atomics, dim=1)]
 
     def _pad_to_size(
