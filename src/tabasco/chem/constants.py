@@ -41,7 +41,9 @@ CHEMICAL_SYMBOLS = [
     'Fr', 'Ra', 'Ac', 'Th', 'Pa', 'U', 'Np', 'Pu', 'Am', 'Cm', 'Bk',
     'Cf', 'Es', 'Fm', 'Md', 'No', 'Lr',
     'Rf', 'Db', 'Sg', 'Bh', 'Hs', 'Mt', 'Ds', 'Rg', 'Cn', 'Nh', 'Fl', 'Mc',
-    'Lv', 'Ts', 'Og']
+    'Lv', 'Ts', 'Og',
+    # pseudo atoms
+    'NA']
 
 ATOM_COLOR_MAP = {
     "C": "black",

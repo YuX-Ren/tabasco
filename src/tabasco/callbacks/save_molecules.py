@@ -215,7 +215,7 @@ class SaveGeneratedMolsCallback(Callback):
         generated_batch, trajectories = lightning_module.sample(
             batch_size=self.num_samples,
             num_steps=self.num_sampling_steps,
-            return_trajectories=True,
+            return_trajectories=False,
         )
         mol_list = lightning_module.mol_converter.from_batch(generated_batch)
 

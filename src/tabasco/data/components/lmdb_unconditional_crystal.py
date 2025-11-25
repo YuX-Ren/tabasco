@@ -42,7 +42,9 @@ chemical_symbols = [
     'Fr', 'Ra', 'Ac', 'Th', 'Pa', 'U', 'Np', 'Pu', 'Am', 'Cm', 'Bk',
     'Cf', 'Es', 'Fm', 'Md', 'No', 'Lr',
     'Rf', 'Db', 'Sg', 'Bh', 'Hs', 'Mt', 'Ds', 'Rg', 'Cn', 'Nh', 'Fl', 'Mc',
-    'Lv', 'Ts', 'Og']
+    'Lv', 'Ts', 'Og',
+    # pseudo atoms
+    'NA']
 
 class CrystalLMDBDataset(BaseLMDBDataset):
     """
@@ -278,7 +280,7 @@ class CrystalLMDBDataset(BaseLMDBDataset):
             crystal_data=crystal_data,
             pad_to_size=self.max_num_atoms,
         )
-
+        data_tensor["data_type"] = torch.tensor([1], dtype=torch.int32) # add data_type to indicate crystal data
         if "id" in data_dict:
             data_tensor["index"] = data_dict["id"]
 

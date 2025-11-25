@@ -190,7 +190,7 @@ class UnconditionalLMDBDataset(BaseLMDBDataset):
             mol=data_dict["molecule"],
             pad_to_size=self.max_mol_num_atoms,
         )
-
+        data_tensor["data_type"] = torch.tensor([0], dtype=torch.int32) # add data_type to indicate molecule data
         if "id" in data_dict:
             data_tensor["index"] = data_dict["id"]
 

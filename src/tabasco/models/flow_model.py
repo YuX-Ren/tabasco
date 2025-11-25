@@ -26,6 +26,7 @@ class FlowMatchingModel(nn.Module):
         self,
         net: nn.Module,
         coords_interpolant: Interpolant,
+        frac_coords_interpolant: Interpolant,
         atomics_interpolant: Interpolant,
         time_distribution: str = "uniform",
         time_alpha_factor: float = 2.0,
@@ -39,6 +40,7 @@ class FlowMatchingModel(nn.Module):
         """Args:
         net: The neural network predicting velocity fields.
         coords_interpolant: Interpolant for Cartesian coordinates.
+        frac_coords_interpolant: Interpolant for fractional coordinates.
         atomics_interpolant: Interpolant for one-hot atom types.
         time_distribution: `uniform`, `beta`, or `histogram`.
         time_alpha_factor: Alpha for beta distribution (ignored otherwise).
@@ -55,7 +57,7 @@ class FlowMatchingModel(nn.Module):
 
         self.atomics_interpolant = atomics_interpolant
         self.coords_interpolant = coords_interpolant
-
+        self.frac_coords_interpolant = frac_coords_interpolant
         self.interdist_loss = interdist_loss
         self.time_alpha_factor = time_alpha_factor
         self.lattices_interpolant = lattices_interpolant
@@ -85,21 +87,23 @@ class FlowMatchingModel(nn.Module):
 
     def _call_net(self,batch_ori, batch_t, t):
         """Wrapper around `self.net` for `torch.compile` compatibility."""
-        if self.train_materials:
+        if batch_ori["data_type"][0] == 1:
             coords, atom_logits, lattices = self.net(
                 batch_ori["coords"], batch_ori["atomics"], batch_ori["padding_mask"],batch_t["coords"], batch_t["atomics"], t,
                 lattices_ori = batch_ori["lattices"],
                 lattices_t = batch_t["lattices"],
+                data_type = batch_ori["data_type"]
             )
         else:
             coords, atom_logits = self.net(
-                batch_ori["coords"], batch_ori["atomics"], batch_ori["padding_mask"],batch_t["coords"], batch_t["atomics"], t
+                batch_ori["coords"], batch_ori["atomics"], batch_ori["padding_mask"],batch_t["coords"], batch_t["atomics"], t,
+                data_type = batch_ori["data_type"]
             )
         return TensorDict(
             {
                 "coords": coords,
                 "atomics": atom_logits,
-                **({"lattices": lattices} if self.train_materials else {}),
+                **({"lattices": lattices} if batch_ori["data_type"][0] == 1 else {}),
                 "padding_mask": batch_ori["padding_mask"],
             },
             batch_size=batch_ori["padding_mask"].shape[0],
@@ -109,7 +113,7 @@ class FlowMatchingModel(nn.Module):
         """Compute training loss and optional stats."""
 
         if self.num_random_augmentations:
-            if self.train_materials:
+            if batch["data_type"][0] == 1:
                 batch = apply_random_translation(
                     batch, n_augmentations=self.num_random_augmentations
                 )
@@ -117,7 +121,7 @@ class FlowMatchingModel(nn.Module):
                 batch = apply_random_rotation(
                     batch, n_augmentations=self.num_random_augmentations
                 )
-        if self.train_materials:
+        if batch["data_type"][0] == 1:
             num_atoms = (~batch["padding_mask"]).sum(dim=-1).unsqueeze(-1).unsqueeze(-1)
             batch["lattices"] = batch["lattices"] / num_atoms**(1/3)
             batch["coords"] = (batch["coords"] + 0.5) % 1.0 - 0.5
@@ -148,13 +152,19 @@ class FlowMatchingModel(nn.Module):
         if noise_batch is None:
             noise_batch = self._sample_noise_like_batch(x_1)
 
-        x_0_coords, x_t_coords, dx_t_coords = self.coords_interpolant.create_path(
-            x_1=x_1, t=t, x_0=noise_batch
-        )
+        if x_1["data_type"][0] == 0:
+            x_0_coords, x_t_coords, dx_t_coords = self.coords_interpolant.create_path(
+                x_1=x_1, t=t, x_0=noise_batch
+            )
+
+        else:
+            x_0_coords, x_t_coords, dx_t_coords = self.frac_coords_interpolant.create_path(
+                x_1=x_1, t=t, x_0=noise_batch
+            )
         x_0_atomics, x_t_atomics, dx_t_atomics = self.atomics_interpolant.create_path(
             x_1=x_1, t=t, x_0=noise_batch
         )
-        if self.train_materials:
+        if x_1["data_type"][0] == 1:
             x_0_lattices, x_t_lattices, dx_t_lattices = self.lattices_interpolant.create_path(
                 x_1=x_1, t=t, x_0=noise_batch
             )
@@ -166,7 +176,8 @@ class FlowMatchingModel(nn.Module):
                 "coords": x_0_coords,
                 "atomics": x_0_atomics,
                 "padding_mask": pad_mask,
-                **({"lattices": x_0_lattices} if self.train_materials else {}),
+                **({"lattices": x_0_lattices} if x_1["data_type"][0] == 1 else {}),
+                "data_type": x_1["data_type"],
             },
             batch_size=batch_size,
         )
@@ -176,7 +187,8 @@ class FlowMatchingModel(nn.Module):
                 "coords": x_t_coords,
                 "atomics": x_t_atomics,
                 "padding_mask": pad_mask,
-                **({"lattices": x_t_lattices} if self.train_materials else {}),
+                **({"lattices": x_t_lattices} if x_1["data_type"][0] == 1 else {}),
+                "data_type": x_1["data_type"],
             },
             batch_size=batch_size,
         )
@@ -186,7 +198,8 @@ class FlowMatchingModel(nn.Module):
                 "coords": dx_t_coords,
                 "atomics": dx_t_atomics,
                 "padding_mask": pad_mask,
-                **({"lattices": dx_t_lattices} if self.train_materials else {}),
+                **({"lattices": dx_t_lattices} if x_1["data_type"][0] == 1 else {}),
+                "data_type": x_1["data_type"],
             },
             batch_size=batch_size,
         )
@@ -205,10 +218,15 @@ class FlowMatchingModel(nn.Module):
         atomics_loss, atomics_stats = self.atomics_interpolant.compute_loss(
             path, pred, compute_stats
         )
-        coords_loss, coord_stats = self.coords_interpolant.compute_loss(
-            path, pred, compute_stats
-        )
-        if self.train_materials:
+        if path.x_1["data_type"][0] == 0:
+            coords_loss, coord_stats = self.coords_interpolant.compute_loss(
+                path, pred, compute_stats
+            )
+        else:
+            coords_loss, coord_stats = self.frac_coords_interpolant.compute_loss(
+                path, pred, compute_stats
+            )
+        if path.x_1["data_type"][0] == 1:
             lattices_loss, lattices_stats = self.lattices_interpolant.compute_loss(
                 path, pred, compute_stats
             )
@@ -223,7 +241,7 @@ class FlowMatchingModel(nn.Module):
             stats_dict = {
                 "atomics_loss": atomics_loss,
                 "coords_loss": coords_loss,
-                **({"lattices_loss": lattices_loss} if self.train_materials else {}),
+                **({"lattices_loss": lattices_loss} if path.x_1["data_type"][0] == 1 else {}),
                 **atomics_stats,
                 **coord_stats,
                 **lattices_stats,
@@ -287,7 +305,7 @@ class FlowMatchingModel(nn.Module):
             batch_size: Required when `batch` is `None`.
             return_trajectories: If True, also return intermediate snapshots.
         """
-        if self.train_materials:
+        if batch["data_type"][0] == 1:
             num_atoms = (~batch["padding_mask"]).sum(dim=-1).unsqueeze(-1).unsqueeze(-1)
             batch["lattices"] = batch["lattices"] / num_atoms**(1/3)
             batch["coords"] = (batch["coords"] + 0.5) % 1.0 - 0.5
@@ -306,7 +324,7 @@ class FlowMatchingModel(nn.Module):
             x_t = self._step(batch, x_t, t, dt)
             if return_trajectories:
                 trajectories.append(deepcopy(x_t.detach().cpu()))
-        if self.train_materials:
+        if x_t["data_type"][0] == 1:
             num_atoms = (~x_t["padding_mask"]).sum(dim=-1).unsqueeze(-1).unsqueeze(-1)
             x_t["lattices"] = x_t["lattices"] * num_atoms**(1/3)
             batch["lattices"] = batch["lattices"] * num_atoms**(1/3)
@@ -322,9 +340,12 @@ class FlowMatchingModel(nn.Module):
         with torch.no_grad():
             out_batch = self._call_net(batch, x_t, t)
 
-        x_t["coords"] = self.coords_interpolant.step(x_t, out_batch, t, step_size)
+        if x_t["data_type"][0] == 0:
+            x_t["coords"] = self.coords_interpolant.step(x_t, out_batch, t, step_size)
+        else:
+            x_t["coords"] = self.frac_coords_interpolant.step(x_t, out_batch, t, step_size)
         x_t["atomics"] = self.atomics_interpolant.step(x_t, out_batch, t, step_size)
-        if self.train_materials:
+        if x_t["data_type"][0] == 1:
             x_t["lattices"] = self.lattices_interpolant.step(x_t, out_batch, t, step_size)
         return x_t
 
@@ -359,18 +380,25 @@ class FlowMatchingModel(nn.Module):
             pad_mask = batch["padding_mask"]
             coord_shape = batch["coords"].shape
             atomics_shape = batch["atomics"].shape
-            lattices_shape = batch["lattices"].shape
+            if batch["data_type"][0] == 1:
+                lattices_shape = batch["lattices"].shape
+            else:
+                lattices_shape = None
 
-        coord_noise = self.coords_interpolant.sample_noise(coord_shape, pad_mask)
+        if batch["data_type"][0] == 0:
+            coord_noise = self.coords_interpolant.sample_noise(coord_shape, pad_mask)
+        else:
+            coord_noise = self.frac_coords_interpolant.sample_noise(coord_shape, pad_mask)
         atomics_noise = self.atomics_interpolant.sample_noise(atomics_shape, pad_mask)
-        if self.train_materials:
+        if batch["data_type"][0] == 1:
             lattices_noise = self.lattices_interpolant.sample_noise(lattices_shape, batch.device)
         noise_batch = TensorDict(
             {
                 "coords": coord_noise,
                 "atomics": atomics_noise,
                 "padding_mask": pad_mask,
-                **({"lattices": lattices_noise} if self.train_materials else {}),
+                **({"lattices": lattices_noise} if batch["data_type"][0] == 1 else {}),
+                "data_type": batch["data_type"],
             },
             batch_size=pad_mask.shape[0],
         )

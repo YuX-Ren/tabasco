@@ -386,7 +386,7 @@ class LatticeInterpolant(Interpolant):
         Returns:
             Tensor: Noise tensor.
         """
-        x_0 = torch.randn(shape).to(device) * self.noise_scale
+        x_0 = torch.rand(shape).to(device) * self.noise_scale
 
         return x_0
 
