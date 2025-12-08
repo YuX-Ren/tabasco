@@ -40,6 +40,39 @@ datamodule_cfg = {
     "num_workers": 0,
 }
 
+def apply_ema_weights_to_model(model: torch.nn.Module, ckpt_path: str, device: str = "cpu"):
+    """
+    Manually load EMA weights from the checkpoint's optimizer_states and apply them to the model.
+    """
+    print(f"Loading checkpoint from {ckpt_path} to extract EMA weights...")
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+
+    if "optimizer_states" not in checkpoint or not checkpoint["optimizer_states"]:
+        print("WARNING: No optimizer_states found in checkpoint! Using original weights.")
+        return
+
+    # Assuming single optimizer
+    opt_state = checkpoint["optimizer_states"][0]
+
+    if "ema" not in opt_state:
+        print("WARNING: No 'ema' key found in optimizer state! Using original weights.")
+        return
+
+    ema_params_list = opt_state["ema"]
+    model_params = list(model.parameters())
+
+    if len(model_params) != len(ema_params_list):
+        print(f"ERROR: Model has {len(model_params)} params, but EMA has {len(ema_params_list)} params.")
+        return
+
+    print("Overwriting model weights with EMA weights...")
+    with torch.no_grad():
+        for param, ema_param in zip(model_params, ema_params_list):
+            # Ensure dtype and device match
+            param.data.copy_(ema_param.to(device=param.device, dtype=param.dtype))
+            
+    print("Successfully applied EMA weights to the model!")
+
 def batch_frac_to_cart_coords_with_lattice(
     frac_coords: torch.Tensor, lattice: torch.Tensor
 ) -> torch.Tensor:
@@ -222,7 +255,6 @@ def export_batch_to_sdf(out_batch: TensorDict, out_path: str):
     mol_converter = MoleculeConverter()
     
     generated_mols = mol_converter.from_batch(out_batch, sanitize=False)
-    out_path = out_path.replace(".pkl", ".sdf")
     dm.to_sdf(generated_mols, urlpath=out_path)
 
 def parse_args():
@@ -264,16 +296,16 @@ def main(cfg: DictConfig):
     """Main entry-point: parse args, load model, sample, export."""
     matcher = StructureMatcher(stol=0.2, angle_tol=5, ltol=0.2)
     # args = parse_args()
-    num_steps = 100
+    num_steps = 10
     # Load the PocketSynth model checkpoint
 
     lightning_module: LightningModule = hydra.utils.instantiate(cfg.lightning_module)   
     # checkpoint_path = 'outputs/2025-11-13/03-18-24/checkpoints/checkpoint_epoch=3699.ckpt'
-    checkpoint_path = 'best.ckpt'
+    checkpoint_path = 'outputs/2025-11-30/17-30-49/checkpoints/epoch=4345_val_rmsd=0.00036.ckpt'
     # lightning_module = lightning_module.load_from_checkpoint('outputs/2025-11-13/03-20-07/checkpoints/checkpoint_epoch=1399.ckpt')
     checkpoint = torch.load(checkpoint_path, weights_only=False)  # 加载 checkpoint
-    lightning_module.load_state_dict(checkpoint["state_dict"])  # 加载 state_dict（模型权重）
-
+    lightning_module.load_state_dict(checkpoint["state_dict"],strict=False)  # 加载 state_dict（模型权重）
+    apply_ema_weights_to_model(lightning_module, checkpoint_path)
     # Initialize datamodule manually using cfg
     datamodule = LmdbDataModule(
         **datamodule_cfg
@@ -367,12 +399,12 @@ def main(cfg: DictConfig):
     # compare the generated and reference molecules by atom type
 
     # Concatenate results from all batches
-    out_batch = torch.cat(out_batch_list, dim=0)
-
-    # Export the sampled batch to pickle if specified
-    # if args.output_path is not None:
-    #     export_batch_to_sdf(batch, args.output_path.replace(".pkl", "_ref.pkl"))
-    #     export_batch_to_sdf(out_batch, args.output_path)
+    # out_batch = torch.cat(out_batch_list, dim=0)
+    # output_path = 'output.sdf'
+    # # Export the sampled batch to pickle if specified
+    # if output_path is not None:
+    #     export_batch_to_sdf(batch, output_path.replace(".sdf", "_ref.sdf"))
+    #     export_batch_to_sdf(out_batch, output_path)
 
 
 if __name__ == "__main__":

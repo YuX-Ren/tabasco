@@ -1,0 +1,8 @@
+checkpoints:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  dirpath: ${paths.output_dir}/checkpoints
+  filename: '{epoch}_{val_rmsd:.5f}'  # Include epoch number for each checkpoint
+  save_top_k: 20  # Save only the most recent checkpoint
+  save_weights_only: false
+  monitor: 'val_rmsd'  #
+  # every_n_epochs: 1  # Save every epoch

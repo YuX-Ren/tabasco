@@ -71,7 +71,7 @@ def apply_random_rotation(batch: TensorDict, n_augmentations=10) -> TensorDict:
     x = batch["coords"].repeat(naug, 1, 1).to(batch.device)
     mask = batch["padding_mask"].repeat(naug, 1).to(batch.device)
     atomics = batch["atomics"].repeat(naug, 1, 1).to(batch.device)
-    data_type = batch["data_type"].repeat(naug, 1).to(batch.device)
+    dataset_idx = batch["dataset_idx"].repeat(naug, 1).to(batch.device)
     rotations = sample_uniform_rotation(
         shape=x.shape[:-2], dtype=x.dtype, device=x.device
     )
@@ -83,11 +83,10 @@ def apply_random_rotation(batch: TensorDict, n_augmentations=10) -> TensorDict:
             "coords": x_rot,
             "padding_mask": mask,
             "atomics": atomics,
-            "data_type": data_type,
+            "dataset_idx": dataset_idx,
         },
         batch_size=x_rot.shape[0],
     ).to(batch.device)
-
     return augmented_batch
 
 def apply_random_translation(batch: TensorDict, n_augmentations=10) -> TensorDict:

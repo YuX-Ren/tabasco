@@ -8,9 +8,6 @@ import torch
 import numpy as np
 from tensordict import TensorDict
 
-# --- 假设这些
-# --- 假设这些来自您之前的代码库 ---
-# (如果您没有 BaseLMDBDataset，请告诉我，我需要重新添加它)
 from tabasco.data.components.lmdb_base import BaseLMDBDataset
 from tabasco.data.transforms import random_rotation, permute_atoms
 from tabasco.utils import RankedLogger

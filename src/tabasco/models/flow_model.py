@@ -10,7 +10,7 @@ from torch import Tensor
 from tabasco.flow.interpolate import Interpolant
 from tabasco.flow.path import FlowPath
 from tabasco.flow.utils import HistogramTimeDistribution
-from tabasco.models.components.losses import InterDistancesLoss
+from tabasco.models.components.losses import InterDistancesLoss, compute_rmsd_with_kabsch
 from tabasco.data.transforms import apply_random_rotation, frac_to_cart_coords, cart_to_frac_coords, apply_random_translation
 
 
@@ -88,14 +88,14 @@ class FlowMatchingModel(nn.Module):
     def _call_net(self,batch_ori, batch_t, t):
         """Wrapper around `self.net` for `torch.compile` compatibility."""
         if batch_ori["data_type"][0] == 1:
-            coords, atom_logits, lattices = self.net(
+            coords, atom_logits, lattices, kl_loss = self.net(
                 batch_ori["coords"], batch_ori["atomics"], batch_ori["padding_mask"],batch_t["coords"], batch_t["atomics"], t,
                 lattices_ori = batch_ori["lattices"],
                 lattices_t = batch_t["lattices"],
                 data_type = batch_ori["data_type"]
             )
         else:
-            coords, atom_logits = self.net(
+            coords, atom_logits, kl_loss = self.net(
                 batch_ori["coords"], batch_ori["atomics"], batch_ori["padding_mask"],batch_t["coords"], batch_t["atomics"], t,
                 data_type = batch_ori["data_type"]
             )
@@ -107,7 +107,7 @@ class FlowMatchingModel(nn.Module):
                 "padding_mask": batch_ori["padding_mask"],
             },
             batch_size=batch_ori["padding_mask"].shape[0],
-        )
+        ), kl_loss
 
     def forward(self, batch, compute_stats: bool = True):
         """Compute training loss and optional stats."""
@@ -129,9 +129,9 @@ class FlowMatchingModel(nn.Module):
 
 
         path = self._create_path(batch)
-        pred = self._call_net(path.x_1, path.x_t, path.t)
+        pred, kl_loss = self._call_net(path.x_1, path.x_t, path.t)
 
-        loss, stats_dict = self._compute_loss(path, pred, compute_stats)
+        loss, stats_dict = self._compute_loss(path, pred, compute_stats, kl_loss)
         return loss, stats_dict
 
     def _create_path(
@@ -211,7 +211,7 @@ class FlowMatchingModel(nn.Module):
         return FlowPath(x_0=x_0, x_t=x_t, dx_t=dx_t, x_1=x_1, t=t)
 
     def _compute_loss(
-        self, path: FlowPath, pred: TensorDict, compute_stats: bool = True
+        self, path: FlowPath, pred: TensorDict, compute_stats: bool = True, kl_loss: Tensor = 0.0
     ) -> Tensor:
         """Compute and sum coordinate, atom-type, and optional inter-distance losses."""
 
@@ -238,14 +238,19 @@ class FlowMatchingModel(nn.Module):
             dists_loss, dists_stats = 0, {}
 
         if compute_stats:
+            pesudo_pred = self.sample(batch=path.x_1, num_steps=2)
+            rmsd = compute_rmsd_with_kabsch(path.x_1, pesudo_pred)
             stats_dict = {
                 "atomics_loss": atomics_loss,
                 "coords_loss": coords_loss,
+                "kl_loss": kl_loss,
+                "rmsd": rmsd,
                 **({"lattices_loss": lattices_loss} if path.x_1["data_type"][0] == 1 else {}),
                 **atomics_stats,
                 **coord_stats,
                 **lattices_stats,
                 **dists_stats,
+                "rmsd": rmsd,
             }
 
             atomics_logit_norm = pred["atomics"].norm(dim=-1)
@@ -260,7 +265,7 @@ class FlowMatchingModel(nn.Module):
         else:
             stats_dict = {}
 
-        total_loss = atomics_loss + coords_loss + dists_loss + lattices_loss
+        total_loss = atomics_loss + coords_loss + dists_loss + lattices_loss + kl_loss
         return total_loss, stats_dict
 
     def _get_sample_schedule(self, num_steps: int) -> Tensor:
@@ -338,7 +343,7 @@ class FlowMatchingModel(nn.Module):
     def _step(self, batch, x_t, t, step_size):
         """Single Euler step at time `t` using model-predicted velocity."""
         with torch.no_grad():
-            out_batch = self._call_net(batch, x_t, t)
+            out_batch, _ = self._call_net(batch, x_t, t)
 
         if x_t["data_type"][0] == 0:
             x_t["coords"] = self.coords_interpolant.step(x_t, out_batch, t, step_size)

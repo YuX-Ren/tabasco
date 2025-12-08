@@ -19,6 +19,9 @@ from tabasco.utils.metrics import (
     AtomFractionMetric,
 )
 from tabasco.utils.save_gen_mol import SaveGeneratedMols
+from tabasco.utils import RankedLogger
+from lightning_utilities.core.rank_zero import rank_zero_only
+import wandb
 
 class LightningTabasco(L.LightningModule):
     """Thin Lightning wrapper around a flow-matching molecule generator.
@@ -111,7 +114,7 @@ class LightningTabasco(L.LightningModule):
         for k, v in stats_dict.items():
             self.log(f"val/{k}", v, on_epoch=True, sync_dist=True)
         self.log("val/loss", loss, on_epoch=True, sync_dist=True)
-        
+        self.log("val_rmsd", stats_dict["rmsd"], on_epoch=True, sync_dist=True)
         # if self.trainer.global_rank == 0 and self.trainer.global_step >= self.next_compute_step:
         #     # Update the counter for the next run
         #     self.next_compute_step += self.compute_every
@@ -144,3 +147,16 @@ class LightningTabasco(L.LightningModule):
         """Restore `data_stats` from checkpoint if present."""
         if "data_stats" in checkpoint:
             self.model.data_stats = checkpoint["data_stats"]
+
+    # @rank_zero_only
+    # def on_epoch_end(self) -> None:
+    #         # Manually log model checkpoint to WandB after every epoch
+    #         if self.current_epoch % 5 == 0:  # Log checkpoint every 5 epochs
+    #             checkpoint = {
+    #                 'epoch': self.current_epoch,
+    #                 'model_state_dict': self.model.state_dict(),
+    #                 'optimizer_state_dict': self.optimizer.state_dict(),
+    #             }
+    #             # Log the checkpoint as an artifact to WandB
+    #             wandb.log({"checkpoint": wandb.Artifact(f"epoch_{self.current_epoch}_checkpoint", type="model", metadata={"epoch": self.current_epoch})})
+                

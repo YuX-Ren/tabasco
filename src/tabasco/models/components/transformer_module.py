@@ -31,6 +31,8 @@ class TransformerModule(nn.Module):
         custom_weight_init: Optional[str] = None,
         levels: list[int] = [4, 4, 4, 4, 4, 4],
         train_materials: bool = True,
+        kl_dim: int = 6,
+        kl_weight: float = 1e-6,
     ):
         """
         Args:
@@ -122,9 +124,11 @@ class TransformerModule(nn.Module):
             )
         else:
             raise ValueError(f"Invalid implementation: {self.implementation}")
-        self.quant_conv = nn.Linear(hidden_dim, 6)
-        self.quantizer = FSQ(levels)
-        self.quant_conv_out = nn.Linear(6, hidden_dim)
+        self.kl_dim = kl_dim
+        self.kl_weight = kl_weight
+        self.quant_conv = nn.Linear(hidden_dim, kl_dim*2)
+        # self.quantizer = FSQ(levels)
+        self.quant_conv_out = nn.Linear(kl_dim, hidden_dim)
         # self.quant_conv_out_norm = nn.LayerNorm(6)
         self.out_coord_linear = nn.Sequential(
             nn.LayerNorm(hidden_dim),
@@ -194,6 +198,19 @@ class TransformerModule(nn.Module):
                         f"Invalid custom weight init: {self.custom_weight_init}"
                     )
 
+    def reparameterize(self, mu, logvar):
+        """
+        Reparameterization trick to sample from N(mu, var) from N(0,1).
+        z = mu + std * epsilon
+        """
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        # 如果是训练模式，加入随机噪声；如果是推理模式，直接返回均值
+        if self.training:
+            return mu + eps * std
+        else:
+            return mu
+
     def encode(self, coord_ori, atomics_ori, padding_mask, lattices_ori=None, train_materials=True):
         """Encode the input."""
         embed_coords = self.enc_linear_embed(coord_ori)
@@ -209,11 +226,20 @@ class TransformerModule(nn.Module):
             encode_embed = self.enc_transformer(h_in, src_key_padding_mask=padding_mask)
         elif self.implementation == "reimplemented":
             encode_embed = self.enc_transformer(h_in, padding_mask=padding_mask)
-        encode_embed = self.quant_conv(encode_embed)
+        # encode_embed = self.quant_conv(encode_embed)
         # encode_embed = self.quant_conv_out_norm(encode_embed)
-        quant_embed, indices = self.quantizer(encode_embed)
-        quant_embed = self.quant_conv_out(encode_embed)
-        return quant_embed
+        # quant_embed, indices = self.quantizer(encode_embed)
+        # quant_embed = self.quant_conv_out(quant_embed)
+        moments = self.quant_conv(encode_embed) 
+        mu, logvar = torch.chunk(moments, 2, dim=-1)
+        z = self.reparameterize(mu, logvar)
+        z_projected = self.quant_conv_out(z)
+        kl_item = (1 + logvar - mu.pow(2) - logvar.exp()) * (1 - padding_mask.int()).unsqueeze(-1)
+        kl_loss = -0.5 * torch.mean(kl_item.sum(dim=-1)) * self.kl_weight
+        if self.training:
+            return z_projected, kl_loss
+        else:
+            return z_projected, 0.0
 
     def forward_molecule(self, coord_ori, atomics_ori, padding_mask, coord_t, atomics_t, t, data_type=0) -> Tensor:
         """Forward pass of the module. Compatible: if train_materials=False, behavior equals the second version."""
@@ -236,7 +262,12 @@ class TransformerModule(nn.Module):
             embed_posenc = torch.zeros(coord_t.shape[0], dec_seq_len, self.hidden_dim, device=coord_t.device)
 
         # encode_embed uses only the first seq_len positions of embed_posenc
-        encode_embed = self.encode(coord_ori, atomics_ori, padding_mask, train_materials = False) * real_mask.unsqueeze(-1) + embed_posenc * real_mask.unsqueeze(-1)
+        encode_embed, kl_loss = self.encode(coord_ori, atomics_ori, padding_mask, train_materials = False)
+        # if self.training:
+        #     if torch.rand(1).item() > 0.5:
+        #         encode_embed = encode_embed * 0.0
+        #         kl_loss = 0.0 * kl_loss
+        encode_embed = encode_embed * real_mask.unsqueeze(-1) + embed_posenc * real_mask.unsqueeze(-1)
 
         embed_time = self.time_encoding(t).unsqueeze(1)
 
@@ -297,7 +328,7 @@ class TransformerModule(nn.Module):
             atom_logits = self.out_atom_type_linear(h_out[:, :dec_seq_len, :])
 
 
-        return coords, atom_logits
+        return coords, atom_logits, kl_loss
 
     def forward_materials(self, coord_ori, atomics_ori, padding_mask, coord_t, atomics_t, t, lattices_ori=None, lattices_t=None) -> Tensor:
         """Forward pass of the module. Compatible: if self.train_materials is False, behavior equals the second version."""
@@ -325,8 +356,9 @@ class TransformerModule(nn.Module):
             embed_posenc = torch.zeros(coord_t.shape[0], dec_seq_len, self.hidden_dim, device=coord_t.device)
 
         # encode_embed uses only the first seq_len positions of embed_posenc
-        encode_embed = self.encode(coord_ori, atomics_ori, dec_padding_mask, lattices_ori, train_materials = True) * dec_real_mask.unsqueeze(-1) + embed_posenc * dec_real_mask.unsqueeze(-1)
-
+        # encode_embed = self.encode(coord_ori, atomics_ori, dec_padding_mask, lattices_ori, train_materials = True) * dec_real_mask.unsqueeze(-1) + embed_posenc * dec_real_mask.unsqueeze(-1)
+        encode_embed, kl_loss = self.encode(coord_ori, atomics_ori, dec_padding_mask, lattices_ori, train_materials = True)
+        encode_embed = encode_embed * dec_real_mask.unsqueeze(-1) + embed_posenc * dec_real_mask.unsqueeze(-1)
         embed_time = self.time_encoding(t).unsqueeze(1)
 
         # Build h_in: include lattices only if train_materials=True
@@ -394,7 +426,7 @@ class TransformerModule(nn.Module):
             lattices = self.lattice_linear(h_lattice)
         else:
             lattices = self.lattice_linear(h_out[:, :3, :])
-        return coords, atom_logits, lattices
+        return coords, atom_logits, lattices, kl_loss
 
     def forward(self, coord_ori, atomics_ori, padding_mask, coord_t, atomics_t, t, lattices_ori=None, lattices_t=None,data_type=0, mode="val") -> Tensor:
         if data_type[0] == 1:

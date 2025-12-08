@@ -1,0 +1,52 @@
+# @package _global_
+
+tags: ["joint", "hot"]
+
+datamodule:
+  _target_: tabasco.data.lmdb_datamodule.LmdbDataModule
+
+  mol_data_dir: ./data/processed_qm9_train.pt
+  crystal_data_dir: ./data/processed_mp_20_train.pt
+  mol_val_data_dir: ./data/processed_qm9_val.pt
+  crystal_val_data_dir: ./data/processed_mp_20_val.pt
+  mol_test_data_dir: ./data/processed_qm9_test.pt
+  crystal_test_data_dir: ./data/processed_mp_20_test.pt
+  crystal_lmdb_dir: ./data/lmdb_mp_20
+  mol_lmdb_dir: ./data/lmdb_qm9
+  train_molecules: true
+  train_materials: true
+
+  add_random_rotation: true
+  add_random_permutation: false
+  reorder_to_smiles_order: true
+  remove_hydrogens: true
+
+  batch_size: 256
+  num_workers: 0
+
+model:
+  net:
+    _target_: tabasco.models.components.transformer_module.TransformerModule
+    hidden_dim: 64
+    num_layers: 16
+    num_heads: 8
+    activation: SiLU
+    implementation: reimplemented # pytorch
+    cross_attention: true
+    train_materials: true
+    kl_dim: 4
+
+callbacks:
+  ema:
+    _target_: tabasco.callbacks.ema.EMA
+    decay: 0.999
+    every_n_steps: 1
+
+lightning_module:
+  optimizer:
+    lr: 0.0001
+
+logger:
+  wandb:
+    name: "tabasco-hot-joint-kl16"
+    project: "tabasco"
