@@ -190,6 +190,7 @@ class UnconditionalLMDBDataset(BaseLMDBDataset):
             mol=data_dict["molecule"],
             pad_to_size=self.max_mol_num_atoms,
         )
+        data_tensor["dataset_idx"] = torch.tensor([1], dtype=torch.int32) # add data_type to indicate crystal data
 
         if "id" in data_dict:
             data_tensor["index"] = data_dict["id"]

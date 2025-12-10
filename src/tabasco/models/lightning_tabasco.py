@@ -73,13 +73,13 @@ class LightningTabasco(L.LightningModule):
         """Pass dataset statistics to sub-modules and init metrics that need them."""
         # TODO: fix: this is a hack to get the novelty metric to work
         self.model.set_data_stats(stats)
-        all_smiles = stats["all_smiles"]
-        self.mol_metrics["novelty"] = MolecularNovelty(
-            original_smiles=all_smiles, sync_on_compute=False
-        )
-        self.mol_metrics["atom_type_distribution"] = AtomTypeDistribution(
-            original_smiles=all_smiles, sync_on_compute=False
-        )
+        # all_smiles = stats["all_smiles"]
+        # self.mol_metrics["novelty"] = MolecularNovelty(
+        #     original_smiles=all_smiles, sync_on_compute=False
+        # )
+        # self.mol_metrics["atom_type_distribution"] = AtomTypeDistribution(
+        #     original_smiles=all_smiles, sync_on_compute=False
+        # )
 
     def training_step(self, batch):
         """Perform a single training step."""
