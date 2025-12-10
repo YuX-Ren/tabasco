@@ -30,6 +30,8 @@ class TransformerModule(nn.Module):
         concat_combine_input: bool = False,
         custom_weight_init: Optional[str] = None,
         levels: list[int] = [4, 4, 4, 4, 4, 4],
+        kl_dim: int = 6,
+        kl_weight: float = 1e-6,
     ):
         """
         Args:
@@ -53,7 +55,7 @@ class TransformerModule(nn.Module):
         self.concat_combine_input = concat_combine_input
         self.custom_weight_init = custom_weight_init
         print(f"Implementation: {self.implementation}")
-
+        self.kl_weight = kl_weight
         self.cond_embed = nn.Embedding(2, hidden_dim)
 
         self.enc_linear_embed = nn.Linear(spatial_dim, hidden_dim, bias=False)
@@ -117,9 +119,9 @@ class TransformerModule(nn.Module):
             )
         else:
             raise ValueError(f"Invalid implementation: {self.implementation}")
-        self.quant_conv = nn.Linear(hidden_dim, 6)
-        self.quantizer = FSQ(levels)
-        self.quant_conv_out = nn.Linear(6, hidden_dim)
+        self.quant_conv = nn.Linear(hidden_dim, kl_dim*2)
+        # self.quantizer = FSQ(levels)
+        self.quant_conv_out = nn.Linear(kl_dim, hidden_dim)
         # self.quant_conv_out_norm = nn.LayerNorm(6)
         self.out_coord_linear = nn.Sequential(
             nn.LayerNorm(hidden_dim),
@@ -177,6 +179,19 @@ class TransformerModule(nn.Module):
                         f"Invalid custom weight init: {self.custom_weight_init}"
                     )
 
+    def reparameterize(self, mu, logvar):
+        """
+        Reparameterization trick to sample from N(mu, var) from N(0,1).
+        z = mu + std * epsilon
+        """
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        # 如果是训练模式，加入随机噪声；如果是推理模式，直接返回均值
+        if self.training:
+            return mu + eps * std
+        else:
+            return mu
+
     def encode(self, coord_ori, atomics_ori, padding_mask):
         """Encode the input."""
         embed_coords = self.enc_linear_embed(coord_ori)
@@ -186,13 +201,42 @@ class TransformerModule(nn.Module):
             encode_embed = self.enc_transformer(h_in, src_key_padding_mask=padding_mask)
         elif self.implementation == "reimplemented":
             encode_embed = self.enc_transformer(h_in, padding_mask=padding_mask)
-        encode_embed = self.quant_conv(encode_embed)
+        # encode_embed = self.quant_conv(encode_embed)
         # encode_embed = self.quant_conv_out_norm(encode_embed)
-        quant_embed, indices = self.quantizer(encode_embed)
-        quant_embed = self.quant_conv_out(encode_embed)
-        return quant_embed
+        # quant_embed, indices = self.quantizer(encode_embed)
+        # quant_embed = self.quant_conv_out(quant_embed)
+        moments = self.quant_conv(encode_embed) 
+        mu, logvar = torch.chunk(moments, 2, dim=-1)
+        z = self.reparameterize(mu, logvar)
+        z_projected = self.quant_conv_out(z)
+        kl_item = (1 + logvar - mu.pow(2) - logvar.exp()) * ~padding_mask.unsqueeze(-1)
+        kl_loss = -0.5 * torch.mean(kl_item.sum(dim=-1)) * self.kl_weight
+        if self.training:
+            return z_projected, kl_loss
+        else:
+            return z_projected, 0.0
 
-    def forward(self, coord_ori, atomics_ori, padding_mask, coord_t, atomics_t, t, mode = "val") -> Tensor:
+    def encode_z(self, coord_ori, atomics_ori, padding_mask):
+        """Encode the input."""
+        embed_coords = self.enc_linear_embed(coord_ori)
+        embed_atom_types = self.enc_atom_type_embed(atomics_ori.argmax(dim=-1))
+        h_in = embed_coords + embed_atom_types
+        if self.implementation == "pytorch":
+            encode_embed = self.enc_transformer(h_in, src_key_padding_mask=padding_mask)
+        elif self.implementation == "reimplemented":
+            encode_embed = self.enc_transformer(h_in, padding_mask=padding_mask)
+        # encode_embed = self.quant_conv(encode_embed)
+        # encode_embed = self.quant_conv_out_norm(encode_embed)
+        # quant_embed, indices = self.quantizer(encode_embed)
+        # quant_embed = self.quant_conv_out(quant_embed)
+        moments = self.quant_conv(encode_embed) 
+        mu, logvar = torch.chunk(moments, 2, dim=-1)
+        z = self.reparameterize(mu, logvar)
+        return z
+
+    def decode_z(self, z, coord_t, atomics_t, padding_mask, t, mode = "val") -> Tensor:
+        """Decode the input."""
+        encode_embed = self.quant_conv_out(z)
         """Forward pass of the module."""
 
         real_mask = 1 - padding_mask.int()
@@ -208,8 +252,7 @@ class TransformerModule(nn.Module):
             embed_posenc = torch.zeros(
                 coord_t.shape[0], coord_t.shape[1], self.hidden_dim
             ).to(coord_t.device)
-
-        encode_embed = self.encode(coord_ori, atomics_ori, padding_mask) * real_mask.unsqueeze(-1) + embed_posenc * real_mask.unsqueeze(-1)
+        encode_embed = encode_embed * real_mask.unsqueeze(-1) + embed_posenc * real_mask.unsqueeze(-1)
 
         embed_time = self.time_encoding(t).unsqueeze(1)
 
@@ -278,3 +321,94 @@ class TransformerModule(nn.Module):
             atom_logits = self.out_atom_type_linear(h_out)
 
         return coords, atom_logits
+
+    def forward(self, coord_ori, atomics_ori, padding_mask, coord_t, atomics_t, t, mode = "val") -> Tensor:
+        """Forward pass of the module."""
+
+        real_mask = 1 - padding_mask.int()
+
+        embed_coords = self.linear_embed(coord_t)
+        embed_atom_types = self.atom_type_embed(atomics_t.argmax(dim=-1))
+
+        if self.add_sinusoid_posenc:
+            embed_posenc = self.positional_encoding(
+                batch_size=coord_t.shape[0], seq_len=coord_t.shape[1]
+            )
+        else:
+            embed_posenc = torch.zeros(
+                coord_t.shape[0], coord_t.shape[1], self.hidden_dim
+            ).to(coord_t.device)
+        encode_embed, kl_loss = self.encode(coord_ori, atomics_ori, padding_mask)
+        # if self.training:
+        #     if torch.rand(1).item() > 0.5:
+        #         encode_embed = encode_embed * 0.0
+        #         kl_loss = 0.0 * kl_loss
+        encode_embed = encode_embed * real_mask.unsqueeze(-1) + embed_posenc * real_mask.unsqueeze(-1)
+
+        embed_time = self.time_encoding(t).unsqueeze(1)
+
+        assert embed_posenc.shape == embed_coords.shape == embed_atom_types.shape, (
+            f"embed_posenc.shape: {embed_posenc.shape}, embed_coords.shape: {embed_coords.shape}, embed_atom_types.shape: {embed_atom_types.shape}"
+        )
+
+        if self.concat_combine_input:
+            embed_time = embed_time.repeat(1, coord_t.shape[1], 1)
+            h_in = torch.cat(
+                [embed_coords, embed_atom_types, embed_posenc, embed_time], dim=-1
+            )
+            assert h_in.shape == (
+                coord_t.shape[0],
+                coord_t.shape[1],
+                4 * self.hidden_dim,
+            ), f"h_in.shape: {h_in.shape}"
+            h_in = self.combine_input(h_in)
+            assert h_in.shape == (coord_t.shape[0], coord_t.shape[1], self.hidden_dim), (
+                f"h_in.shape: {h_in.shape}"
+            )
+        else:
+            h_in = embed_coords + embed_atom_types + embed_posenc + embed_time
+        h_in = h_in * real_mask.unsqueeze(-1)
+        # h_in = h_in + encode_embed
+        h_in = torch.cat( [h_in, encode_embed], dim=1)
+        cond_pos = torch.cat(
+                (
+                    torch.zeros(coord_t.shape[0], coord_t.shape[1], dtype=torch.long, device=coord_t.device),
+                    torch.ones(coord_t.shape[0], coord_t.shape[1], dtype=torch.long, device=coord_t.device),
+                ),
+                dim=-1,
+            )
+        h_in = h_in + self.cond_embed(cond_pos)
+        
+        if self.implementation == "pytorch":
+            h_out = self.transformer(h_in, src_key_padding_mask=torch.cat( [padding_mask, padding_mask], dim=1))
+        elif self.implementation == "reimplemented":
+            h_out = self.transformer(h_in, padding_mask=torch.cat( [padding_mask, padding_mask], dim=1))
+
+        # load the half of the input to the output
+        seq_len = coord_t.shape[1]
+        h_out = h_out[:, :seq_len, :]
+        h_out = h_out * real_mask.unsqueeze(-1)
+
+        if self.cross_attention:
+            h_coord = self.coord_cross_attention(
+                h_out,
+                h_in[:, :seq_len, :],
+                tgt_key_padding_mask=padding_mask,
+                memory_key_padding_mask=padding_mask,
+            )
+            coords = self.out_coord_linear(h_coord)
+        else:
+            coords = self.out_coord_linear(h_out)
+
+        if self.cross_attention:
+            h_atom = self.atom_cross_attention(
+                h_out,
+                h_in[:, :seq_len, :],
+                tgt_key_padding_mask=padding_mask,
+                memory_key_padding_mask=padding_mask,
+            )
+            atom_logits = self.out_atom_type_linear(h_atom)
+        else:
+            atom_logits = self.out_atom_type_linear(h_out)
+
+        return coords, atom_logits, kl_loss

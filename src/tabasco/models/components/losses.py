@@ -108,3 +108,84 @@ class InterDistancesLoss(nn.Module):
 
         dists_loss = dists_loss.mean()
         return dists_loss, stats_dict
+
+import numpy as np
+def kabsch_algorithm(P, Q):
+    """
+    Kabsch algorithm to align two sets of points P and Q using numpy.
+    
+    P: numpy.ndarray, shape (N, 3) - Reference structure (aligned)
+    Q: numpy.ndarray, shape (N, 3) - Generated structure to align
+    
+    Returns: 
+        R: numpy.ndarray, shape (3, 3) - The optimal rotation matrix
+        aligned_Q: numpy.ndarray, shape (N, 3) - The aligned Q
+    """
+    # Step 1: Compute centroids of both point clouds
+    centroid_P = np.mean(P, axis=0)
+    centroid_Q = np.mean(Q, axis=0)
+    
+    # Step 2: Center the coordinates (subtract centroids)
+    P_centered = P - centroid_P
+    Q_centered = Q - centroid_Q
+    
+    # Step 3: Compute the covariance matrix
+    H = np.dot(P_centered.T, Q_centered)
+    
+    # Step 4: Singular Value Decomposition (SVD)
+    U, _, Vt = np.linalg.svd(H)
+    
+    # Step 5: Calculate the optimal rotation matrix R
+    R = np.dot(Vt.T, U.T)
+    
+    # Step 6: If the determinant is negative, the rotation matrix is a reflection, so we flip the sign of Vt
+    if np.linalg.det(R) < 0:
+        Vt[2, :] *= -1
+        R = np.dot(Vt.T, U.T)
+    
+    # Step 7: Apply the rotation to Q
+    aligned_Q = np.dot(Q_centered, R.T) + centroid_P  # Recenter to the original centroid
+    
+    return R, aligned_Q
+
+def compute_rmsd_with_kabsch(batch, out_batch):
+    """
+    Compute the RMSD with Kabsch alignment, ignoring padded atoms.
+    
+    batch: dict, contains the reference coordinates
+    out_batch: dict, contains the generated coordinates
+    
+    Returns:
+        rmsd: float - The RMSD after alignment
+    """
+    coords_ref = batch["coords"]
+    coords_gen = out_batch["coords"]
+    real_mask = ~out_batch["padding_mask"]  # ~mask to get True for valid atoms
+
+    # Ensure coordinates are on the same device (e.g., CUDA)
+    coords_ref = coords_ref.cpu().numpy()
+    coords_gen = coords_gen.cpu().numpy()
+    real_mask = real_mask.cpu().numpy()
+
+    # Initialize RMSD accumulator
+    rmsds = 0.0
+
+    # Iterate through each molecule in the batch
+    for i in range(coords_ref.shape[0]):
+        # Extract individual molecule's coords (ignoring padding mask)
+        ref_coords = coords_ref[i][real_mask[i]]
+        gen_coords = coords_gen[i][real_mask[i]]
+        if ref_coords.shape[0] > 0:  # Ensure there are valid atoms
+            # Apply Kabsch alignment to this pair of molecules
+            _, aligned_gen_coords = kabsch_algorithm(ref_coords, gen_coords)
+            # Calculate the squared differences between the aligned coords
+            sq_diff = np.mean((aligned_gen_coords - ref_coords)**2, axis=-1)
+
+            # Average over the valid (non-masked) atoms
+            per_molecule_rmsd = np.sqrt(np.mean(sq_diff))
+            # print(per_molecule_rmsd)
+            # Accumulate RMSD over all molecules
+            rmsds += per_molecule_rmsd.item()
+            
+    # Return average RMSD over all valid molecules in the batch
+    return rmsds/batch.shape[0]

@@ -4,7 +4,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from omegaconf import DictConfig, OmegaConf
 from lightning_utilities.core.rank_zero import rank_zero_only
-
+import torch
 from tabasco.utils import pylogger, rich_utils
 
 log = pylogger.RankedLogger(__name__, rank_zero_only=True)
@@ -181,3 +181,37 @@ def log_hyperparameters(object_dict: Dict[str, Any]) -> None:
     # send hparams to all loggers
     for logger in trainer.loggers:
         logger.log_hyperparams(hparams)
+
+
+def apply_ema_weights_to_model(model: torch.nn.Module, ckpt_path: str, device: str = "cpu"):
+    """
+    Manually load EMA weights from the checkpoint's optimizer_states and apply them to the model.
+    """
+    print(f"Loading checkpoint from {ckpt_path} to extract EMA weights...")
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+
+    if "optimizer_states" not in checkpoint or not checkpoint["optimizer_states"]:
+        print("WARNING: No optimizer_states found in checkpoint! Using original weights.")
+        return
+
+    # Assuming single optimizer
+    opt_state = checkpoint["optimizer_states"][0]
+
+    if "ema" not in opt_state:
+        print("WARNING: No 'ema' key found in optimizer state! Using original weights.")
+        return
+
+    ema_params_list = opt_state["ema"]
+    model_params = list(model.parameters())
+
+    if len(model_params) != len(ema_params_list):
+        print(f"ERROR: Model has {len(model_params)} params, but EMA has {len(ema_params_list)} params.")
+        return
+
+    print("Overwriting model weights with EMA weights...")
+    with torch.no_grad():
+        for param, ema_param in zip(model_params, ema_params_list):
+            # Ensure dtype and device match
+            param.data.copy_(ema_param.to(device=param.device, dtype=param.dtype))
+            
+    print("Successfully applied EMA weights to the model!")

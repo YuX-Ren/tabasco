@@ -21,13 +21,13 @@ datamodule:
 model:
   net:
     _target_: tabasco.models.components.transformer_module.TransformerModule
-    hidden_dim: 64
+    hidden_dim: 256
     num_layers: 16
     num_heads: 8
     activation: SiLU
     implementation: reimplemented # pytorch
     cross_attention: true
-    kl_dim: 6
+    kl_dim: 8
 
 callbacks:
   ema:
@@ -41,5 +41,5 @@ lightning_module:
 
 logger:
   wandb:
-    name: "tabasco-hot-qm9-kl6"
+    name: "tabasco-hot-qm9-kl8-cfg"
     project: "tabasco"

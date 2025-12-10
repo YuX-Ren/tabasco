@@ -15,7 +15,7 @@ datamodule:
   reorder_to_smiles_order: true
   remove_hydrogens: true
 
-  batch_size: 256
+  batch_size: 512
   num_workers: 0
 
 model:
@@ -27,7 +27,7 @@ model:
     activation: SiLU
     implementation: reimplemented # pytorch
     cross_attention: true
-    kl_dim: 6
+    kl_dim: 8
 
 callbacks:
   ema:
@@ -41,5 +41,5 @@ lightning_module:
 
 logger:
   wandb:
-    name: "tabasco-hot-qm9-kl6"
+    name: "tabasco-hot-qm9-kl8"
     project: "tabasco"

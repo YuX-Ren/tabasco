@@ -10,7 +10,7 @@ from torch import Tensor
 from tabasco.flow.interpolate import Interpolant
 from tabasco.flow.path import FlowPath
 from tabasco.flow.utils import HistogramTimeDistribution
-from tabasco.models.components.losses import InterDistancesLoss
+from tabasco.models.components.losses import InterDistancesLoss, compute_rmsd_with_kabsch
 from tabasco.data.transforms import apply_random_rotation
 
 
@@ -33,6 +33,7 @@ class FlowMatchingModel(nn.Module):
         num_random_augmentations: Optional[int] = None,
         sample_schedule: str = "linear",
         compile: bool = False,
+        aug_translation_scale: Optional[float] = 0.1,
     ):
         """Args:
         net: The neural network predicting velocity fields.
@@ -44,6 +45,7 @@ class FlowMatchingModel(nn.Module):
         num_random_augmentations: Number of random rotations per sample.
         sample_schedule: `linear`, `power`, or `log` schedule in `sample`.
         compile: If True, passes the network through `torch.compile`.
+        aug_translation_scale: Scale of translation augmentation.
         """
         super().__init__()
         self.net = net
@@ -76,6 +78,7 @@ class FlowMatchingModel(nn.Module):
 
         self.num_random_augmentations = num_random_augmentations
         self.sample_schedule = sample_schedule
+        self.aug_translation_scale = aug_translation_scale
 
     def set_data_stats(self, stats: Dict):
         """Set the data statistics."""
@@ -83,7 +86,7 @@ class FlowMatchingModel(nn.Module):
 
     def _call_net(self,batch_ori, batch_t, t):
         """Wrapper around `self.net` for `torch.compile` compatibility."""
-        coords, atom_logits = self.net(
+        coords, atom_logits, kl_loss = self.net(
             batch_ori["coords"], batch_ori["atomics"], batch_ori["padding_mask"],batch_t["coords"], batch_t["atomics"], t
         )
 
@@ -94,7 +97,69 @@ class FlowMatchingModel(nn.Module):
                 "padding_mask": batch_ori["padding_mask"],
             },
             batch_size=batch_ori["padding_mask"].shape[0],
+        ), kl_loss
+
+    def encode(self, batch):
+        """Encode the batch into a latent space."""
+        return {
+            "x": self.net.encode_z(batch["coords"], batch["atomics"], batch["padding_mask"])
+        }
+
+    def decode(
+        self,
+        z: Optional[TensorDict] = None,
+        padding_mask: Optional[Tensor] = None,
+        num_steps: int = 10,
+        batch_size: Optional[int] = None,
+        return_trajectories: bool = False,
+    ):
+        """Sample molecules.
+
+        Args:
+            batch: Optional reference batch whose padding mask/shape determine
+                the noise tensor. If `None`, shapes are drawn from
+                `self.data_stats`.
+            num_steps: Number of Euler steps.
+            batch_size: Required when `batch` is `None`.
+            return_trajectories: If True, also return intermediate snapshots.
+        """
+        z = z["x"]
+        x_t = self._sample_noise_like_z(z, padding_mask)
+        if return_trajectories:
+            trajectories = []
+
+        T = self._get_sample_schedule(num_steps)
+        T = T.to(x_t.device)[:, None]
+        T = T.repeat(1, x_t["coords"].shape[0])
+
+        for i in range(1, len(T)):
+            t = T[i - 1]
+            dt = T[i] - T[i - 1]
+
+            x_t = self.decode_step(z, x_t, padding_mask, t, dt)
+            if return_trajectories:
+                trajectories.append(deepcopy(x_t.detach().cpu()))
+
+        if return_trajectories:
+            return x_t, trajectories
+
+        return x_t
+
+    def decode_step(self, z, x_t, padding_mask, t, step_size):
+        """Single Euler step at time `t` using model-predicted velocity."""
+        with torch.no_grad():
+            coords, atom_logits, = self.net.decode_z(z, x_t["coords"], x_t["atomics"], padding_mask, t)
+        out_batch = TensorDict(
+            {
+                "coords": coords,
+                "atomics": atom_logits,
+                "padding_mask": padding_mask,
+            },
+            batch_size=padding_mask.shape[0],
         )
+        x_t["coords"] = self.coords_interpolant.step(x_t, out_batch, t, step_size)
+        x_t["atomics"] = self.atomics_interpolant.step(x_t, out_batch, t, step_size)
+        return x_t
 
     def forward(self, batch, compute_stats: bool = True):
         """Compute training loss and optional stats."""
@@ -103,11 +168,13 @@ class FlowMatchingModel(nn.Module):
             batch = apply_random_rotation(
                 batch, n_augmentations=self.num_random_augmentations
             )
-
+            if self.aug_translation_scale:
+                trans_aug = self.aug_translation_scale * torch.randn(batch['coords'].shape[0], batch['coords'].shape[1], 3, dtype=batch['coords'].dtype).to(batch.device)
+                batch['coords'] = batch['coords'] + trans_aug * (~batch['padding_mask']).unsqueeze(-1)
         path = self._create_path(batch)
-        pred = self._call_net(path.x_1, path.x_t, path.t)
+        pred, kl_loss = self._call_net(path.x_1, path.x_t, path.t)
 
-        loss, stats_dict = self._compute_loss(path, pred, compute_stats)
+        loss, stats_dict = self._compute_loss(path, pred, kl_loss, compute_stats)
         return loss, stats_dict
 
     def _create_path(
@@ -172,7 +239,7 @@ class FlowMatchingModel(nn.Module):
         return FlowPath(x_0=x_0, x_t=x_t, dx_t=dx_t, x_1=x_1, t=t)
 
     def _compute_loss(
-        self, path: FlowPath, pred: TensorDict, compute_stats: bool = True
+        self, path: FlowPath, pred: TensorDict, kl_loss: Tensor, compute_stats: bool = True
     ) -> Tensor:
         """Compute and sum coordinate, atom-type, and optional inter-distance losses."""
 
@@ -188,9 +255,14 @@ class FlowMatchingModel(nn.Module):
             dists_loss, dists_stats = 0, {}
 
         if compute_stats:
+            # calculate rmsd
+            pesudo_pred = self.sample(batch=path.x_1, num_steps=2)
+            rmsd = compute_rmsd_with_kabsch(path.x_1, pesudo_pred)
             stats_dict = {
                 "atomics_loss": atomics_loss,
                 "coords_loss": coords_loss,
+                "kl_loss": kl_loss,
+                "rmsd": rmsd,
                 **atomics_stats,
                 **coord_stats,
                 **dists_stats,
@@ -208,7 +280,7 @@ class FlowMatchingModel(nn.Module):
         else:
             stats_dict = {}
 
-        total_loss = atomics_loss + coords_loss + dists_loss
+        total_loss = atomics_loss + coords_loss + dists_loss + kl_loss
 
         return total_loss, stats_dict
 
@@ -254,36 +326,46 @@ class FlowMatchingModel(nn.Module):
             batch_size: Required when `batch` is `None`.
             return_trajectories: If True, also return intermediate snapshots.
         """
-
-        x_t = self._sample_noise_like_batch(batch, batch_size)
-        if return_trajectories:
-            trajectories = []
-
-        T = self._get_sample_schedule(num_steps)
-        T = T.to(x_t.device)[:, None]
-        T = T.repeat(1, x_t["coords"].shape[0])
-
-        for i in range(1, len(T)):
-            t = T[i - 1]
-            dt = T[i] - T[i - 1]
-
-            x_t = self._step(batch, x_t, t, dt)
-            if return_trajectories:
-                trajectories.append(deepcopy(x_t.detach().cpu()))
-
-        if return_trajectories:
-            return x_t, trajectories
+    
+        z = self.encode(batch)
+        x_t = self.decode(z, batch["padding_mask"], num_steps, batch_size, return_trajectories)
 
         return x_t
 
     def _step(self, batch, x_t, t, step_size):
         """Single Euler step at time `t` using model-predicted velocity."""
         with torch.no_grad():
-            out_batch = self._call_net(batch, x_t, t)
+            out_batch, _ = self._call_net(batch, x_t, t)
 
         x_t["coords"] = self.coords_interpolant.step(x_t, out_batch, t, step_size)
         x_t["atomics"] = self.atomics_interpolant.step(x_t, out_batch, t, step_size)
         return x_t
+
+    def _sample_noise_like_z(
+        self, z: Optional[Tensor] = None, 
+        padding_mask: Optional[Tensor] = None,
+    ):
+        """Draw coordinate and atom-type noise compatible with `batch`."""
+        # Determine device
+        device = z.device if z is not None else next(self.parameters()).device
+
+        coord_shape = torch.Size(list(z.shape[:-1]) + [self.data_stats["spatial_dim"]])
+        atomics_shape = torch.Size(list(z.shape[:-1]) + [self.data_stats["atom_dim"]])
+
+        coord_noise = self.coords_interpolant.sample_noise(coord_shape, padding_mask)
+        atomics_noise = self.atomics_interpolant.sample_noise(atomics_shape, padding_mask)
+
+        noise_batch = TensorDict(
+            {
+                "coords": coord_noise,
+                "atomics": atomics_noise,
+                "padding_mask": padding_mask,
+            },
+            batch_size=padding_mask.shape[0],
+        )
+        noise_batch = noise_batch.to(device)
+
+        return noise_batch
 
     def _sample_noise_like_batch(
         self, batch: Optional[TensorDict] = None, batch_size: Optional[int] = None
