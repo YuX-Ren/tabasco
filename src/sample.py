@@ -239,8 +239,9 @@ def main():
     num_steps = args.num_steps
 
     # Load the PocketSynth model checkpoint
-    lightning_module = LightningTabasco.load_from_checkpoint(args.checkpoint)
+    lightning_module = LightningTabasco.load_from_checkpoint(args.checkpoint, weights_only=False)
     apply_ema_weights_to_model(lightning_module.model, args.checkpoint)
+    lightning_module.model.net.train_diffusion = False
     # Initialize datamodule manually using cfg
     datamodule = LmdbDataModule(
         **cfg

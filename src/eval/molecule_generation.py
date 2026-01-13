@@ -118,7 +118,13 @@ class MoleculeGenerationEvaluator:
                     len(novel_smiles) / len(valid_smiles), device=self.device
                 ),
             }
-            pb_metrics_dict = self.buster.bust(valid_molecules, None, None).mean().to_dict()
+            results = self.buster.bust(valid_molecules, None, None)
+            pb_metrics_dict = results.mean().to_dict()
+            posebusters_sum = 0.0
+            for _, row in results.iterrows():
+                posebusters_sum += 0 if row.isin([False]).any() else 1
+            pb_valid_rate = posebusters_sum / len(valid_molecules)
+            pb_metrics_dict["pb_valid_rate"] = pb_valid_rate
         else:
             validity_metrics_dict = {
                 "valid_rate": torch.tensor(0.0, device=self.device),
@@ -126,6 +132,7 @@ class MoleculeGenerationEvaluator:
                 "novel_rate": torch.tensor(0.0, device=self.device),
             }
             pb_metrics_dict = {
+                "pb_valid_rate": 0.0,
                 "mol_pred_loaded": 0.0,
                 "sanitization": 0.0,
                 "inchi_convertible": 0.0,

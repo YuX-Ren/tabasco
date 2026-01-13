@@ -50,7 +50,7 @@ def log_hyperparameters(object_dict: Dict[str, Any]) -> None:
         hparams["encoder"] = cfg["encoder"]
         hparams["decoder"] = cfg["decoder"]
     elif "diffusion" in hparams["task_name"]:
-        hparams["diffusion_module"] = cfg["diffusion_module"]
+        hparams["diffusion_experiment"] = cfg["diffusion_experiment"]
     else:
         raise ValueError(f"Task name {hparams['task_name']} not recognized!")
 

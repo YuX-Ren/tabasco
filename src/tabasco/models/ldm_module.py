@@ -49,8 +49,9 @@ atom_converter = {
     5: 17,
     6: 35,
     7: 53,
+    8: 1,
 }
-atom_converter = torch.tensor([6, 7, 8, 9, 16, 17, 35, 53])
+atom_converter = torch.tensor([6, 7, 8, 9, 16, 17, 35, 53, 1])
 class LatentDiffusionLitModule(LightningModule):
     """LightningModule for latent diffusion generative modellling of 3D atomic systems.
 
@@ -105,7 +106,7 @@ class LatentDiffusionLitModule(LightningModule):
         self.save_hyperparameters(logger=False)
         self.num_random_augmentations = num_random_augmentations
         # autoencoder models (first-stage model)
-        lightning_module = LightningTabasco.load_from_checkpoint(autoencoder_ckpt)
+        lightning_module = LightningTabasco.load_from_checkpoint(autoencoder_ckpt, weights_only=False)
         apply_ema_weights_to_model(lightning_module.model, autoencoder_ckpt)
 
         self.autoencoder_ckpt = autoencoder_ckpt
@@ -130,7 +131,7 @@ class LatentDiffusionLitModule(LightningModule):
             # ),
             "qm9": MoleculeGenerationEvaluator(
                 dataset_smiles_list=torch.load(
-                    os.path.join(self.hparams.sampling.data_dir, f"smiles.pt"),
+                    os.path.join(self.hparams.sampling.data_dir, f"geom_smiles.pt"),
                 ),
                 removeHs=self.hparams.sampling.removeHs,
             ),
@@ -180,6 +181,7 @@ class LatentDiffusionLitModule(LightningModule):
                         "x_loss t=[75,100)": MeanMetric(),
                         "t_avg": MeanMetric(),
                         "valid_rate": MeanMetric(),
+                        "pb_valid_rate": MeanMetric(),
                         "unique_rate": MeanMetric(),
                         "novel_rate": MeanMetric(),
                         "mol_pred_loaded": MeanMetric(),
@@ -242,7 +244,7 @@ class LatentDiffusionLitModule(LightningModule):
             # ),
             "qm9": torch.nn.Parameter(
                 torch.load(
-                    os.path.join(self.hparams.sampling.data_dir, f"num_nodes_bincount.pt"),
+                    os.path.join(self.hparams.sampling.data_dir, f"geom_num_nodes_bincount.pt"),
                     map_location="cpu",
                 ),
                 requires_grad=False,
