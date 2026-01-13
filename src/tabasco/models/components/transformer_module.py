@@ -211,7 +211,7 @@ class TransformerModule(nn.Module):
             encode_embed = self.enc_transformer(h_in, padding_mask=padding_mask)
         encode_embed = self.quant_conv(encode_embed)
         # encode_embed = self.quant_conv_out_norm(encode_embed)
-        quant_embed, indices = self.quantizer(encode_embed)
+        # quant_embed, indices = self.quantizer(encode_embed)
         quant_embed = self.quant_conv_out(encode_embed)
         return quant_embed
 
@@ -228,7 +228,7 @@ class TransformerModule(nn.Module):
 
         # build padding mask that matches h_in length
         if self.train_materials:
-            dec_padding_mask = torch.cat([padding_mask, torch.zeros(coord_t.shape[0], 3, device=padding_mask.device)], dim=1)
+            dec_padding_mask = torch.cat([torch.zeros(coord_t.shape[0], 3, device=padding_mask.device), padding_mask], dim=1)
         else:
             dec_padding_mask = padding_mask
         # build masks conditionally (only append 3 tokens if train_materials=True)

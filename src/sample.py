@@ -29,6 +29,39 @@ cfg = {
     "train_materials": True
 }
 
+def apply_ema_weights_to_model(model: torch.nn.Module, ckpt_path: str, device: str = "cpu"):
+    """
+    Manually load EMA weights from the checkpoint's optimizer_states and apply them to the model.
+    """
+    print(f"Loading checkpoint from {ckpt_path} to extract EMA weights...")
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+
+    if "optimizer_states" not in checkpoint or not checkpoint["optimizer_states"]:
+        print("WARNING: No optimizer_states found in checkpoint! Using original weights.")
+        return
+
+    # Assuming single optimizer
+    opt_state = checkpoint["optimizer_states"][0]
+
+    if "ema" not in opt_state:
+        print("WARNING: No 'ema' key found in optimizer state! Using original weights.")
+        return
+
+    ema_params_list = opt_state["ema"]
+    model_params = list(model.parameters())
+
+    if len(model_params) != len(ema_params_list):
+        print(f"ERROR: Model has {len(model_params)} params, but EMA has {len(ema_params_list)} params.")
+        return
+
+    print("Overwriting model weights with EMA weights...")
+    with torch.no_grad():
+        for param, ema_param in zip(model_params, ema_params_list):
+            # Ensure dtype and device match
+            param.data.copy_(ema_param.to(device=param.device, dtype=param.dtype))
+            
+    print("Successfully applied EMA weights to the model!")
+
 def batch_frac_to_cart_coords_with_lattice(
     frac_coords: torch.Tensor, lattice: torch.Tensor
 ) -> torch.Tensor:
@@ -256,7 +289,7 @@ def main():
 
     # Load the PocketSynth model checkpoint
     lightning_module = LightningTabasco.load_from_checkpoint(args.checkpoint)
-
+    apply_ema_weights_to_model(lightning_module, args.checkpoint)
     # Initialize datamodule manually using cfg
     datamodule = LmdbDataModule(
         **cfg
