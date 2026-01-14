@@ -5,9 +5,9 @@ tags: ["pdb", "hot"]
 datamodule:
   _target_: tabasco.data.lmdb_datamodule.LmdbDataModule
 
-  data_dir: ./data/processed_pdb_train.pt
-  val_data_dir: ./data/processed_pdb_val.pt
-  test_data_dir: ./data/processed_pdb_test.pt
+  data_dir: ./data/alphadb.pt
+  val_data_dir: ./data/scope.pt
+  test_data_dir: ./data/scope.pt
   lmdb_dir: ./data/lmdb_pdb
 
   add_random_rotation: true

@@ -1,0 +1,49 @@
+_target_: src.tabasco.models.ldm_module.LatentDiffusionLitModule
+
+autoencoder_ckpt: "pdb_kl_16.ckpt"  # path to VAE checkpoint
+
+denoiser:
+  _target_: src.tabasco.models.denoisers.dit.DiT
+  d_x: 16
+  d_model: 768    # 384, 768, 1024
+  nhead: 12        # 6, 12, 16
+  num_layers: 12  # 12, 12, 24
+  num_datasets: 3
+  
+interpolant:
+  _target_: src.tabasco.flow.interpolate.FlowMatchingInterpolant
+  min_t: 1e-2
+  corrupt: True
+  num_timesteps: 100
+  self_condition: true
+  self_condition_prob: 0.5
+
+augmentations:
+  frac_coords: true
+  pos: true
+
+sampling:
+  cfg_scale: 2.0
+  num_samples: 100
+  batch_size: 100
+  data_dir: ${paths.data_dir}
+  visualize: true
+  save_dir: ${paths.viz_dir}
+  removeHs: true  # only retain heavy atoms (for molecules)
+
+conditioning:
+  dataset_idx: true  # always true
+  spacegroup: false
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 0.0001
+  weight_decay: 0.0
+
+scheduler: null
+
+scheduler_frequency: ${trainer.check_val_every_n_epoch}
+
+# compile model for faster training with pytorch 2.0
+compile: false

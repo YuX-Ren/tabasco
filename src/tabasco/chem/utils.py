@@ -1,7 +1,10 @@
 from rdkit import Chem
 from typing import List
 from torch import Tensor
-
+import os
+import numpy as np
+import biotite.structure as struc
+from biotite.structure.io.pdb import PDBFile
 
 def largest_component(molecules: List[Chem.Mol]) -> List[Chem.Mol]:
     """Return the largest connected component for each molecule.
@@ -87,3 +90,56 @@ def write_xyz_file(coords: Tensor, atom_types: List[str], filename: str) -> None
         out += f"{atom_types[i]} {coords[i, 0]:.3f} {coords[i, 1]:.3f} {coords[i, 2]:.3f}\n"
     with open(filename, "w") as f:
         f.write(out)
+
+
+def save_aa_coords(aatypes_seq_list, coords_list, savedir=None):
+
+
+    with open(os.path.join(savedir, "sequence.fasta"), 'w') as file:
+        for idx, aa_seq in enumerate(aatypes_seq_list):
+            file.write(f">seq{idx} \n")
+            file.write(aa_seq + " \n")
+
+    with open(os.path.join(savedir, "seq_len.txt"), 'w') as file:
+        for idx, aa_seq in enumerate(aatypes_seq_list):
+            file.write(f">seq{idx} {len(aa_seq)} \n")
+
+    savedir = os.path.join(savedir, "pdbs", "")
+    if not os.path.exists(savedir):
+        os.makedirs(savedir)
+    for i in range(len(coords_list)):
+        fname = os.path.join(savedir, f"generated_{i}.pdb")
+        write_coords_to_pdb(coords_list[i], fname)
+
+def write_coords_to_pdb(coords: np.ndarray, out_fname: str) -> str:
+    """
+    Write the coordinates to the given pdb fname
+    """
+    # Create a new PDB file using biotite
+    # https://www.biotite-python.org/tutorial/target/index.html#creating-structures
+    # assert len(coords) % 3 == 0
+
+    atoms = []
+    for i, ca_coord in enumerate(coords):
+
+        atom = struc.Atom(
+            ca_coord,
+            chain_id="A",
+            res_id=i + 1,
+            atom_id=i + 1,
+            res_name="GLY",
+            atom_name="CA",
+            element="C",
+            occupancy=1.0,
+            hetero=False,
+            b_factor=5.0,
+        )
+
+        atoms.extend([atom])
+    full_structure = struc.array(atoms)
+
+
+    sink = PDBFile()
+    sink.set_structure(full_structure)
+    sink.write(out_fname)
+    return out_fname

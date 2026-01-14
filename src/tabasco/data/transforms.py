@@ -89,3 +89,43 @@ def apply_random_rotation(batch: TensorDict, n_augmentations=10) -> TensorDict:
     ).to(batch.device)
 
     return augmented_batch
+
+def apply_random_rotation_one(batch: TensorDict) -> TensorDict:
+    """Augment a batch with `n_augmentations` additional random rotations.
+
+    Args:
+        batch: TensorDict with keys `coords`, `padding_mask`, `atomics`.
+        n_augmentations: Number of extra rotated copies to generate.
+
+    Returns:
+        TensorDict with keys `coords`, `padding_mask`, `atomics` and
+        `n_augmentations` extra copies.
+
+    Reference: NVIDIA-Digital-Bio/proteina implementation.
+    """
+    assert batch["coords"].ndim == 3, (
+        f"Augmetations can only be used for simple (x_1) batches [b, n, 3], current shape is {batch['coords'].shape}"
+    )
+    assert batch["padding_mask"].ndim == 2, (
+        f"Augmetations can only be used for simple (mask) batches [b, n], current shape is {batch['padding_mask'].shape}"
+    )
+
+    x = batch["coords"]
+    mask = batch["padding_mask"]
+    atomics = batch["atomics"]
+    dataset_idx = batch["dataset_idx"]
+    rotations = sample_uniform_rotation(
+        shape=x.shape[:-2], dtype=x.dtype, device=x.device
+    )
+
+    x_rot = torch.matmul(x, rotations).to(batch.device)
+
+    return TensorDict(
+        {
+            "coords": x_rot,
+            "padding_mask": mask,
+            "atomics": atomics,
+            "dataset_idx": dataset_idx,
+        },
+        batch_size=x_rot.shape[0],
+    ).to(batch.device)

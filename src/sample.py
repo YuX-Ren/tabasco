@@ -15,19 +15,19 @@ import tqdm
 
 # Manually setting the configuration dictionary (cfg)
 cfg = {
-    # "data_dir": "./data/processed_qm9_train.pt",
-    # "val_data_dir": "./data/processed_qm9_val.pt",
-    # "test_data_dir": "./data/processed_qm9_test.pt",
-    # "lmdb_dir": "./data/lmdb_qm9",
-    "data_dir": "./data/processed_geom_train.pt",
-    "val_data_dir": "./data/processed_geom_val.pt",
-    "test_data_dir": "./data/processed_geom_test.pt",
-    "lmdb_dir": "./data/lmdb_geom",
+    "data_dir": "./data/processed_pdb_train.pt",
+    "val_data_dir": "./data/processed_pdb_val.pt",
+    "test_data_dir": "./data/processed_pdb_test.pt",
+    "lmdb_dir": "./data/lmdb_pdb",
+    # "data_dir": "./data/processed_geom_train.pt",
+    # "val_data_dir": "./data/processed_geom_val.pt",
+    # "test_data_dir": "./data/processed_geom_test.pt",
+    # "lmdb_dir": "./data/lmdb_geom",
     "add_random_rotation": False,
     "add_random_permutation": False,
     "reorder_to_smiles_order": True,
     "remove_hydrogens": True,
-    "batch_size": 4096,
+    "batch_size": 256,
     "num_workers": 0
 }
 
@@ -102,6 +102,45 @@ def kabsch_algorithm(P, Q):
     
     return R, aligned_Q
 
+def calculate_torsion_angle(coords_ca):
+    """
+    Compute the torsion angles from a sequence of CA coordinates using numpy.
+
+    coords_ca: np.ndarray, shape (N, 3)
+        The coordinates of CA atoms.
+
+    Returns:
+        torsion_angle: np.ndarray, shape (N - 3,)
+            The torsion angles in radians.
+    """
+    v1 = coords_ca[1:-2] - coords_ca[0:-3]  # r_ji
+    v2 = coords_ca[2:-1] - coords_ca[1:-2]  # r_kj
+    v3 = coords_ca[3:]   - coords_ca[2:-1]  # r_lk
+
+    # Normalize vectors
+    v1 = v1 / np.linalg.norm(v1, axis=1, keepdims=True)
+    v2 = v2 / np.linalg.norm(v2, axis=1, keepdims=True)
+    v3 = v3 / np.linalg.norm(v3, axis=1, keepdims=True)
+
+    # Normal vectors to the planes
+    n1 = np.cross(v1, v2)
+    n2 = np.cross(v2, v3)
+
+    # a = dot(n1, n2)
+    a = np.sum(n1 * n2, axis=-1)
+
+    # b = dot(cross(n1, n2), v2) / norm(v2)
+    n1_cross_n2 = np.cross(n1, n2)
+    v2_norm = np.linalg.norm(v2, axis=1)
+    b = np.divide(np.sum(n1_cross_n2 * v2, axis=-1), v2_norm, 
+                  out=np.zeros_like(a), where=(v2_norm != 0))
+
+    # Compute the torsion angle using atan2
+    torsion_angle = np.arctan2(b, a)
+    torsion_angle = np.nan_to_num(torsion_angle)
+
+    return torsion_angle
+
 def compute_rmsd_with_kabsch(batch, out_batch):
     """
     Compute the RMSD with Kabsch alignment, ignoring padded atoms.
@@ -112,8 +151,8 @@ def compute_rmsd_with_kabsch(batch, out_batch):
     Returns:
         rmsd: float - The RMSD after alignment
     """
-    coords_ref = batch["coords"]
-    coords_gen = out_batch["coords"]
+    coords_ref = batch["coords"] * 4.0
+    coords_gen = out_batch["coords"] * 4.0
     real_mask = ~out_batch["padding_mask"]  # ~mask to get True for valid atoms
 
     # Ensure coordinates are on the same device (e.g., CUDA)
@@ -123,7 +162,8 @@ def compute_rmsd_with_kabsch(batch, out_batch):
 
     # Initialize RMSD accumulator
     rmsds = 0.0
-
+    edge_stability = 0.0
+    torsion_angle_diffs = 0.0
     # Iterate through each molecule in the batch
     for i in range(coords_ref.shape[0]):
         # Extract individual molecule's coords (ignoring padding mask)
@@ -137,12 +177,20 @@ def compute_rmsd_with_kabsch(batch, out_batch):
 
             # Average over the valid (non-masked) atoms
             per_molecule_rmsd = np.sqrt(np.mean(sq_diff))
-            # print(per_molecule_rmsd)
-            # Accumulate RMSD over all molecules
+
+            # evaluate the edge stability
+            pred_edges_dist = np.linalg.norm(aligned_gen_coords[1:] - aligned_gen_coords[:-1], axis=-1)
+            stable = np.logical_and((pred_edges_dist > 3.65), (pred_edges_dist < 3.95))
+            edge_stable = stable.sum() / stable.size
+            # Calculate the torsion angle difference
+            torsion_angle = calculate_torsion_angle(aligned_gen_coords)
+            ref_torsion_angle = calculate_torsion_angle(ref_coords)
+            torsion_angle_diff = np.mean(np.abs(torsion_angle - ref_torsion_angle))
             rmsds += per_molecule_rmsd.item()
-            
+            edge_stability += edge_stable
+            torsion_angle_diffs += torsion_angle_diff
     # Return average RMSD over all valid molecules in the batch
-    return rmsds
+    return rmsds, edge_stability, torsion_angle_diffs
 
 def sample_batch(
     lightning_module: L.LightningModule,
@@ -198,6 +246,36 @@ def export_batch_to_sdf(out_batch: TensorDict, out_path: str):
     generated_mols = mol_converter.from_batch(out_batch, sanitize=False)
     dm.to_sdf(generated_mols, urlpath=out_path)
 
+def write_pdb_file(coords, atom_types, out_path: str):
+    """Write a molecule to a PDB file.
+    """
+    with open(out_path, "w") as f:
+        for i, (coord, atom_type) in enumerate(zip(coords, atom_types)):
+            x, y, z = coord
+            # PDB ATOM record format:
+            # "ATOM  ", Serial(5), Name(4), ResName(3), Chain(1), ResSeq(4),
+            # X(8.3), Y(8.3), Z(8.3), Occ(6.2), Temp(6.2), Segment(4), Element(2)
+            # 这里简化处理：Residue=MOL, Chain=A, ResSeq=1
+            f.write(
+                f"ATOM  {i + 1:5d}  CA  {atom_type:<3} A{i + 1:4d}    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          C\n"
+            )
+        f.write("END\n")
+
+def export_batch_to_pdb(out_batch: TensorDict, out_path: str):
+    """Serialize generated molecules and basic metrics.
+    """
+    mol_converter = MoleculeConverter()
+    for idx, out_mol in enumerate(out_batch):
+        out_atom_types = mol_converter.get_atom_types_from_tensor(out_mol)
+        coords_gen = out_mol["coords"] * 5.0
+        real_mask = ~out_mol["padding_mask"] 
+        coords_gen = coords_gen[real_mask]
+        write_pdb_file(coords_gen, out_atom_types, out_path.replace(".pdb", f"_{idx}.pdb"))
+        if real_mask.sum() == 127:
+            break
+        # break
+
 def parse_args():
     """Return CLI arguments parsed with `argparse`."""
     parser = argparse.ArgumentParser(description="Run PocketSynth generation")
@@ -239,7 +317,7 @@ def main():
     num_steps = args.num_steps
 
     # Load the PocketSynth model checkpoint
-    lightning_module = LightningTabasco.load_from_checkpoint(args.checkpoint)
+    lightning_module = LightningTabasco.load_from_checkpoint(args.checkpoint, weights_only=False)
     apply_ema_weights_to_model(lightning_module.model, args.checkpoint)
     # Initialize datamodule manually using cfg
     datamodule = LmdbDataModule(
@@ -266,6 +344,8 @@ def main():
 
     # Sampling from validation data loader
     rmsds = 0
+    edge_stability = 0
+    torsion_angle_diff = 0
     num_graphs = 0
     for batch in tqdm.tqdm(datamodule.test_dataloader()):
         batch = batch.to("cuda")
@@ -278,34 +358,46 @@ def main():
         out_batch_list.append(out_batch)
         # calculate the rmsd between the generated and reference molecules
         # for mol, target_mol in zip(batch,out_batch):
-        per_batch_rmsd = compute_rmsd_with_kabsch(batch, out_batch)
+        per_batch_rmsd, per_batch_edge_stability, per_batch_torsion_angle_diff = compute_rmsd_with_kabsch(batch, out_batch)
         # sq_diff = (out_batch["coords"] - batch["coords"]).pow(2).sum(dim=-1)
         # sq_diff = sq_diff * (~out_batch["padding_mask"])
         # per_batch_mse = sq_diff.sum(dim=-1)/(~out_batch["padding_mask"]).sum(dim=-1)
         # rmsd = per_batch_mse.sqrt().mean()
         num_graphs += batch['padding_mask'].shape[0]
         rmsds += per_batch_rmsd
+        edge_stability += per_batch_edge_stability
+        torsion_angle_diff += per_batch_torsion_angle_diff
+        accuracy_sum = 0
+        accuracy_count = 0
         for out_mol, batch_mol in zip(out_batch, batch):
             out_atom_types = lightning_module.mol_converter.get_atom_types_from_tensor(out_mol)
             batch_atom_types = lightning_module.mol_converter.get_atom_types_from_tensor(batch_mol)
+            # calculate the accuracy of the atom types
+            accuracy_sum += np.sum(np.array(out_atom_types) == np.array(batch_atom_types))
+            accuracy_count += len(out_atom_types)
             if out_atom_types != batch_atom_types:
                 print(f"out atom types: {out_atom_types}, batch atom types: {batch_atom_types}")
         break
-    # rmsds /= len(datamodule.test_dataloader())
+    accuracy = accuracy_sum/accuracy_count
     rmsd = rmsds/num_graphs
+    edge_stability = edge_stability/num_graphs
+    torsion_angle_diff = torsion_angle_diff/num_graphs
+    print(f"accuracy: {accuracy}")
     print(f"rmsd: {rmsd}")
+    print(f"edge_stability: {edge_stability}")
+    print(f"torsion_angle_diff: {torsion_angle_diff}")
     mse = out_batch["coords"] - batch["coords"]
     mse = mse.pow(2).mean()
     print(f"mse: {mse}")
     # compare the generated and reference molecules by atom type
 
     # Concatenate results from all batches
-    out_batch = torch.cat(out_batch_list, dim=0)
+    # out_batch = torch.cat(out_batch_list, dim=0)
 
     # Export the sampled batch to pickle if specified
     if args.output_path is not None:
-        export_batch_to_sdf(batch, args.output_path.replace(".sdf", "_ref.sdf"))
-        export_batch_to_sdf(out_batch, args.output_path)
+        export_batch_to_pdb(batch, args.output_path.replace(".pdb", "_ref.pdb"))
+        export_batch_to_pdb(out_batch, args.output_path)
 
 
 if __name__ == "__main__":

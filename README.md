@@ -72,10 +72,7 @@ torchrun --nproc_per_node=2 --nnodes=1 src/train.py experiment=hot_geom trainer=
 ### Sampling
 We provide two scripts for sampling from a model checkpoint, as well as some convenient parameters to modify. Unconditional sampling is called with:
 ```python
-python src/sample.py \
-    --num_mols 1000 --num_steps 100 \
-    --checkpoint path/to/model.ckpt \
-    --output_path path/to/output/folder
+python src/sample.py --num_mols 1000 --num_steps 100 --checkpoint path/to/model.ckpt    
 ```
 
 **Boosting Physical Plausibility**: This is a script for sampling molecules with boosted physical quality (Section 3.5). Where `guidance` encodes the step size of each gradient step, `step-switch` the point at which to switch to UFF bound guidance, and `to-center` whether to regress to the interval center.

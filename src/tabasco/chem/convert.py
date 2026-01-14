@@ -13,7 +13,7 @@ from torch import Tensor
 import tempfile
 
 from tabasco.chem.utils import attempt_sanitize, write_xyz_file
-from tabasco.chem.constants import ATOM_COLOR_MAP, ATOM_NAMES
+from tabasco.chem.constants import ATOM_COLOR_MAP, ATOM_NAMES, ALL_ATOM_NAMES_WITH_PROTEIN
 from tabasco.data.utils import batch_to_list
 from tabasco.utils import RankedLogger
 from rdkit import RDLogger
@@ -31,7 +31,7 @@ class MoleculeConverter:
 
     def __init__(
         self,
-        atom_names=ATOM_NAMES,
+        atom_names=ALL_ATOM_NAMES_WITH_PROTEIN,
         atom_color_map=ATOM_COLOR_MAP,
         dataset_normalizer=2.0,
     ):
