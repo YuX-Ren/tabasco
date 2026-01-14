@@ -142,41 +142,6 @@ class LmdbDataModule(LightningDataModule):
         val_datasets = []
         test_datasets = []
 
-        # --- 1. 加载分子数据集 ---
-        if self.train_molecules:
-            if self.mol_data_dir:
-                log.info(f"Loading molecule train dataset from: {self.mol_data_dir}")
-                mol_train_ds = UnconditionalLMDBDataset(
-                    data_dir=self.mol_data_dir,
-                    split="train",
-                    lmdb_dir=self.mol_lmdb_dir,
-                    **self.mol_dataset_kwargs,
-                )
-                train_datasets.append(mol_train_ds)
-                self.mol_train_len = len(mol_train_ds) # <--- 存储长度
-
-            if self.mol_val_data_dir:
-                # (val 和 test 的逻辑保持不变，继续使用 ConcatDataset)
-                log.info(f"Loading molecule val dataset from: {self.mol_val_data_dir}")
-                mol_val_ds = UnconditionalLMDBDataset(
-                    data_dir=self.mol_val_data_dir,
-                    split="val",
-                    lmdb_dir=self.mol_lmdb_dir,
-                    **self.mol_dataset_kwargs,
-                )
-                val_datasets.append(mol_val_ds)
-                self.mol_val_len = len(mol_val_ds) # <--- 存储长度
-            if self.mol_test_data_dir:
-                log.info(f"Loading molecule test dataset from: {self.mol_test_data_dir}")
-                mol_test_ds = UnconditionalLMDBDataset(
-                    data_dir=self.mol_test_data_dir,
-                    split="test",
-                    lmdb_dir=self.mol_lmdb_dir,
-                    **self.mol_dataset_kwargs,
-                )
-                test_datasets.append(mol_test_ds)
-                self.mol_test_len = len(mol_test_ds) # <--- 存储长度
-        # --- 2. 加载材料 (晶体) 数据集 ---
         if self.train_materials:
             if self.crystal_data_dir:
                 log.info(f"Loading material train dataset from: {self.crystal_data_dir}")
@@ -188,7 +153,6 @@ class LmdbDataModule(LightningDataModule):
                 )
                 train_datasets.append(crystal_train_ds)
                 self.crystal_train_len = len(crystal_train_ds) # <--- 存储长度
-
             if self.crystal_val_data_dir:
                 log.info(f"Loading material val dataset from: {self.crystal_val_data_dir}")
                 crystal_val_ds = CrystalLMDBDataset(
@@ -231,7 +195,6 @@ class LmdbDataModule(LightningDataModule):
     def train_dataloader(self):
         """
         Return the training `DataLoader`.
-        使用 MixedBatchSampler 来随机抽取纯批次。
         """
         if not self.train_dataset:
             raise RuntimeError("No training dataset configured.")
@@ -241,50 +204,27 @@ class LmdbDataModule(LightningDataModule):
              log.warning("Dataset lengths are zero. Forcing setup().")
              self.setup()
 
-        # 1. 创建自定义的 BatchSampler
-        sampler = MixedBatchSampler(
-            mol_len=self.mol_train_len,
-            crystal_len=self.crystal_train_len,
-            batch_size=self.batch_size,
-            drop_last=True  # 训练时通常丢弃最后一个批次
-        )
-
-        # 2. 创建 DataLoader
-        # 注意：当提供了 batch_sampler 时，
-        # batch_size, shuffle, drop_last 必须为 None (或默认值)。
         return DataLoader(
             self.train_dataset,
-            batch_sampler=sampler, # <--- 使用自定义的 sampler
+            batch_size=self.batch_size,
             num_workers=self.num_workers,
             collate_fn=TensorDictCollator(),
         )
 
     def val_dataloader(self):
         """Return the validation `DataLoader`."""
-        sampler = MixedBatchSampler(
-            mol_len=self.mol_val_len,
-            crystal_len=self.crystal_val_len,
-            batch_size=self.batch_size,
-            drop_last=True  # 训练时通常丢弃最后一个批次
-        )
         return DataLoader(
             self.val_dataset,
-            batch_sampler=sampler, # <--- 使用自定义的 sampler
+            batch_size=self.batch_size,
             num_workers=self.num_workers,
             collate_fn=TensorDictCollator(),
         )
 
     def test_dataloader(self):
         """Return the test `DataLoader` (falls back to validation set when absent)."""
-        sampler = MixedBatchSampler(
-            mol_len=self.mol_test_len,
-            crystal_len=self.crystal_test_len,
-            batch_size=self.batch_size,
-            drop_last=True  # 训练时通常丢弃最后一个批次
-        )
         return DataLoader(
             self.test_dataset,
-            batch_sampler=sampler, # <--- 使用自定义的 sampler
+            batch_size=self.batch_size,
             num_workers=self.num_workers,
             collate_fn=TensorDictCollator(),
         )

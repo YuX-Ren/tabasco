@@ -28,6 +28,7 @@ class DatasetStatsCallback(Callback):
         """
         if hasattr(trainer.datamodule, "get_dataset_stats"):
             stats = trainer.datamodule.get_dataset_stats()
+            print(stats)
             if hasattr(pl_module, "set_data_stats"):
                 log.info("Adding dataset stats from datamodule to model")
                 pl_module.set_data_stats(stats=stats)

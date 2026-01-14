@@ -20,18 +20,18 @@ from tabasco.chem.crystal_matcher import array_dict_to_crystal
 # Manually setting the configuration dictionary (cfg)
 datamodule_cfg = {
     "data_dir": ".",
-    "crystal_data_dir": "./data/processed_mp20_train.pt",
-    "crystal_val_data_dir": "./data/processed_mp20_val.pt",
-    "crystal_test_data_dir": "./data/processed_mp20_test.pt",
-    "crystal_lmdb_dir": "./data/lmdb_mp_20",
+    "crystal_data_dir": "./data/processed_qmof_train.pt",
+    "crystal_val_data_dir": "./data/processed_qmof_val.pt",
+    "crystal_test_data_dir": "./data/processed_qmof_test.pt",
+    "crystal_lmdb_dir": "./data/lmdb_qmof_new",
     "mol_data_dir": "./data/processed_qm9_train.pt",
     "mol_val_data_dir": "./data/processed_qm9_val.pt",
     "mol_test_data_dir": "./data/processed_qm9_test.pt",
     "mol_lmdb_dir": "./data/lmdb_qm9",
     "train_molecules": True,
     "train_materials": False,
-    # "train_molecules": False,
-    # "train_materials": True,
+    "train_molecules": False,
+    "train_materials": True,
     "add_random_rotation": True,
     "add_random_permutation": False,
     "reorder_to_smiles_order": True,
@@ -275,7 +275,7 @@ def parse_args():
     parser.add_argument(
         "--num_steps",
         type=int,
-        default=100,
+        default=10,
         help="Number of steps to generate (default: 100)",
     )
     parser.add_argument(
@@ -301,7 +301,7 @@ def main(cfg: DictConfig):
 
     lightning_module: LightningModule = hydra.utils.instantiate(cfg.lightning_module)   
     # checkpoint_path = 'outputs/2025-11-13/03-18-24/checkpoints/checkpoint_epoch=3699.ckpt'
-    checkpoint_path = 'outputs/2025-11-30/17-30-49/checkpoints/epoch=4345_val_rmsd=0.00036.ckpt'
+    checkpoint_path = 'outputs/2025-12-28/06-51-21/checkpoints/epoch=43_val_rmsd=0.00158.ckpt'
     # lightning_module = lightning_module.load_from_checkpoint('outputs/2025-11-13/03-20-07/checkpoints/checkpoint_epoch=1399.ckpt')
     checkpoint = torch.load(checkpoint_path, weights_only=False)  # 加载 checkpoint
     lightning_module.load_state_dict(checkpoint["state_dict"],strict=False)  # 加载 state_dict（模型权重）
@@ -380,6 +380,7 @@ def main(cfg: DictConfig):
         # rmsd = per_batch_mse.sqrt().mean()
         num_graphs += batch['padding_mask'].shape[0]
         rmsds += per_batch_rmsd
+        
         for out_mol, batch_mol in zip(out_batch, batch):
             out_atom_types = lightning_module.mol_converter.get_atom_types_from_tensor(out_mol)
             batch_atom_types = lightning_module.mol_converter.get_atom_types_from_tensor(batch_mol)
