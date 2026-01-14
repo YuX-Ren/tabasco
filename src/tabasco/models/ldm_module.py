@@ -212,12 +212,24 @@ class LatentDiffusionLitModule(LightningModule):
     def forward(self, batch, sample_posterior: bool = True):
         # Encode batch to latent space
         with torch.no_grad():
-            encoded_batch = self.autoencoder.encode(batch)
-            x_1 = encoded_batch["x"]
-            if batch['data_type'][0] == 1:
-                mask = torch.cat([torch.zeros(batch['coords'].shape[0], 3, device=batch['coords'].device, dtype=batch['padding_mask'].dtype), batch['padding_mask']], dim=1)
-            else:
-                mask = batch['padding_mask']
+            is_crystal = (batch["data_type"] == 1).flatten() # shape [B]
+            is_molecule = ~is_crystal
+            if is_molecule.any():
+                mol_subbatch = batch[is_molecule] 
+                encoded_mol_subbatch = self.autoencoder.encode(mol_subbatch)
+                mol_mask = mol_subbatch['padding_mask']
+                mol_mask = torch.cat([mol_mask,torch.ones(mol_mask.shape[0], 3, device=mol_mask.device, dtype=mol_mask.dtype)], dim=1)
+                encoded_mol_subbatch["x"] = torch.cat([encoded_mol_subbatch["x"], torch.zeros(encoded_mol_subbatch["x"].shape[0], 3, encoded_mol_subbatch["x"].shape[2], device=encoded_mol_subbatch["x"].device, dtype=encoded_mol_subbatch["x"].dtype)], dim=1)
+
+            if is_crystal.any():
+                crys_subbatch = batch[is_crystal]
+                encoded_crys_subbatch = self.autoencoder.encode(crys_subbatch)
+                crys_mask = crys_subbatch['padding_mask']
+                crys_mask = torch.cat([torch.zeros(crys_mask.shape[0], 3, device=crys_mask.device, dtype=crys_mask.dtype), crys_mask], dim=1)
+            
+            # encoded_batch = self.autoencoder.encode(batch)
+            x_1 = torch.cat([encoded_mol_subbatch["x"], encoded_crys_subbatch["x"]], dim=0)
+            mask = torch.cat([mol_mask, crys_mask], dim=0)
             dense_encoded_batch = {"x_1": x_1, "token_mask": ~mask, "diffuse_mask": ~mask}
 
         self.interpolant.device = dense_encoded_batch["x_1"].device
@@ -268,14 +280,17 @@ class LatentDiffusionLitModule(LightningModule):
 
     def training_step(self, batch, batch_idx: int) -> torch.Tensor:
         with torch.no_grad():
-            if batch["data_type"][0] == 1:
-                batch = apply_random_translation_one(
-                    batch
-                )
-            else:
-                batch = apply_random_rotation_one(
-                    batch
-                )
+            is_crystal = (batch["data_type"] == 1).flatten() # shape [B]
+            is_molecule = ~is_crystal
+            if is_molecule.any():
+                mol_subbatch = batch[is_molecule] 
+                mol_subbatch = apply_random_rotation_one(mol_subbatch)
+                batch["coords"][is_molecule] = mol_subbatch["coords"]
+
+            if is_crystal.any():
+                crys_subbatch = batch[is_crystal]
+                crys_subbatch = apply_random_translation_one(crys_subbatch)
+                batch["coords"][is_crystal] = crys_subbatch["coords"]
 
         pred_x, noisy_dense_encoded_batch = self.forward(batch)
 

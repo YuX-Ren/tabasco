@@ -88,7 +88,8 @@ class UnconditionalLMDBDataset(BaseLMDBDataset):
         """Populate summary statistics and write to disk."""
         num_atoms_histogram = Counter(self.mol_num_atoms_list)
 
-        self.max_mol_num_atoms = max(num_atoms_histogram.keys())
+        self.max_mol_num_atoms = 20
+        # self.max_mol_num_atoms = max(num_atoms_histogram.keys())
 
         example_datapoint = self.__getitem__(0)
 
@@ -188,9 +189,10 @@ class UnconditionalLMDBDataset(BaseLMDBDataset):
 
         data_tensor = self.mol_converter.to_tensor(
             mol=data_dict["molecule"],
-            pad_to_size=self.max_mol_num_atoms,
+            pad_to_size=20,
         )
         data_tensor["data_type"] = torch.tensor([0], dtype=torch.int32) # add data_type to indicate molecule data
+        data_tensor["lattices"] = torch.zeros(3, 3, dtype=torch.float32) # add lattices to indicate molecule data
         if "id" in data_dict:
             data_tensor["index"] = data_dict["id"]
 

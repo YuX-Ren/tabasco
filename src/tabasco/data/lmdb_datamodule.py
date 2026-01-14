@@ -7,8 +7,9 @@ from tabasco.data.components.lmdb_unconditional_crystal import CrystalLMDBDatase
 from torch.utils.data import DataLoader
 from tabasco.utils import RankedLogger
 from torch.utils.data import DataLoader, ConcatDataset, BatchSampler, Sampler
-import random
-
+import random, math
+import torch
+import numpy as np
 log = RankedLogger(__name__, rank_zero_only=True)
 
 class MixedBatchSampler(BatchSampler):
@@ -73,6 +74,97 @@ class MixedBatchSampler(BatchSampler):
 
     def __len__(self) -> int:
         return len(self.batches)
+
+class TrueMixedBatchSampler(Sampler):
+    def __init__(self, mol_len: int, crystal_len: int, batch_size: int, 
+                 num_replicas: int = 1, rank: int = 0, shuffle: bool = True):
+        """
+        构造混合 Batch：
+        每个 Batch 包含 batch_size // 2 个分子 和 batch_size // 2 个晶体。
+        """
+        self.mol_len = mol_len
+        self.crystal_len = crystal_len
+        self.batch_size = batch_size
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.shuffle = shuffle
+        
+        # 确保 batch_size 是偶数以便 50/50 分配
+        assert batch_size % 2 == 0, "Batch size must be even for 50/50 split."
+        self.mol_batch_size = batch_size // 2
+        self.crystal_batch_size = batch_size // 2
+
+        # 计算当前 Rank 应该分到的总样本数（用于 __len__）
+        # 这里以较大的数据集为基准，较小的循环采样
+        self.max_len = max(mol_len, crystal_len)
+        self.num_samples = int(math.ceil(self.max_len / self.num_replicas))
+        self.num_batches = int(math.ceil(self.num_samples / (self.batch_size // 2)))
+
+    def __iter__(self):
+        # 1. 生成全局索引
+        mol_indices = torch.arange(self.mol_len)
+        # 晶体索引要在 Dataset 中偏移 mol_len
+        crystal_indices = torch.arange(self.mol_len, self.mol_len + self.crystal_len)
+
+        # 2. DDP 切分 (Subsampling)
+        # 确定 deterministic 的种子，保证每个 epoch 不同但各卡同步
+        g = torch.Generator()
+        g.manual_seed(self.rank + 0) # 这里的 seed 可以加 epoch 偏移如果是在 set_epoch 调用中
+
+        if self.shuffle:
+            mol_indices = mol_indices[torch.randperm(self.mol_len, generator=g)]
+            crystal_indices = crystal_indices[torch.randperm(self.crystal_len, generator=g)]
+
+        # 简单的 DDP 切分：直接按 rank 取余是不够随机的，最好是 chunk
+        # 这里为了简化，假设已经 shuffle 过了，直接切片
+        # 注意：为了混合，我们不对“总池子”切分，而是让每个 Rank 都遍历自己的那部分
+        # 更好的策略：每个 Rank 负责 Dataset 的一部分
+        
+        mol_indices_local = mol_indices[self.rank::self.num_replicas]
+        crystal_indices_local = crystal_indices[self.rank::self.num_replicas]
+
+        # 3. 处理长度不一致：循环较短的那个
+        max_len_local = max(len(mol_indices_local), len(crystal_indices_local))
+        
+        def infinite_iterator(indices):
+            while True:
+                for idx in indices:
+                    yield idx
+        
+        mol_iter = infinite_iterator(mol_indices_local)
+        crystal_iter = infinite_iterator(crystal_indices_local)
+
+        # 4. 生成 Batches
+        # 计算当前卡需要产出多少个 batch
+        # 我们以覆盖所有数据为目标
+        num_batches_local = max(
+            int(math.ceil(len(mol_indices_local) / self.mol_batch_size)),
+            int(math.ceil(len(crystal_indices_local) / self.crystal_batch_size))
+        )
+
+        for _ in range(num_batches_local):
+            batch = []
+            # 取分子
+            for _ in range(self.mol_batch_size):
+                batch.append(next(mol_iter).item())
+            # 取晶体
+            for _ in range(self.crystal_batch_size):
+                batch.append(next(crystal_iter).item())
+            
+            # (可选) 在 Batch 内部再次 Shuffle，打乱分子和晶体的顺序
+            # 这样进入模型时不是前一半分子后一半晶体
+            np.random.shuffle(batch)
+            
+            yield batch
+
+    def __len__(self):
+        # 估算长度
+        mol_local = math.ceil(self.mol_len / self.num_replicas)
+        crys_local = math.ceil(self.crystal_len / self.num_replicas)
+        return max(
+            math.ceil(mol_local / self.mol_batch_size),
+            math.ceil(crys_local / self.crystal_batch_size)
+        )
 
 class LmdbDataModule(LightningDataModule):
     """PyTorch Lightning `DataModule` for unconditional ligand generation."""
@@ -254,11 +346,10 @@ class LmdbDataModule(LightningDataModule):
              self.setup()
 
         # 1. 创建自定义的 BatchSampler
-        sampler = MixedBatchSampler(
+        sampler = TrueMixedBatchSampler(
             mol_len=self.mol_train_len,
             crystal_len=self.crystal_train_len,
             batch_size=self.batch_size,
-            drop_last=True,
             shuffle=True,
         )
 
@@ -274,11 +365,10 @@ class LmdbDataModule(LightningDataModule):
 
     def val_dataloader(self):
         """Return the validation `DataLoader`."""
-        sampler = MixedBatchSampler(
+        sampler = TrueMixedBatchSampler(
             mol_len=self.mol_val_len,
             crystal_len=self.crystal_val_len,
             batch_size=self.batch_size,
-            drop_last=True,
             shuffle=False,
         )
         return DataLoader(
@@ -290,11 +380,10 @@ class LmdbDataModule(LightningDataModule):
 
     def test_dataloader(self):
         """Return the test `DataLoader` (falls back to validation set when absent)."""
-        sampler = MixedBatchSampler(
+        sampler = TrueMixedBatchSampler(
             mol_len=self.mol_test_len,
             crystal_len=self.crystal_test_len,
             batch_size=self.batch_size,
-            drop_last=True,
             shuffle=False,
         )
         return DataLoader(

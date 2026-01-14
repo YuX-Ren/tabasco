@@ -6,8 +6,8 @@ defaults:
   - datamodule: lmdb_datamodule # inmemory_datamodule
   - lightning_module: lightning_tabasco
   - model: flow_model
-  - diffusion_experiment: ldm_kl16
-  - experiment: hot_joint_kl16
+  - diffusion_experiment: ldm_kl8
+  - experiment: hot_joint_kl8
   - callbacks: diffusion_default  # diffusion_default / _qm9_only / _mp20_only
   - logger: wandb # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
   - trainer: default
