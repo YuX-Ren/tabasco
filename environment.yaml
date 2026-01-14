@@ -1,9 +1,4 @@
-name: tabasco
-
-channels:
-  - defaults
-  - pytorch
-  - conda-forge
+name: mol_vq
 
 dependencies:
   - python=3.11

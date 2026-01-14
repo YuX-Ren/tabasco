@@ -296,12 +296,12 @@ def main(cfg: DictConfig):
     """Main entry-point: parse args, load model, sample, export."""
     matcher = StructureMatcher(stol=0.2, angle_tol=5, ltol=0.2)
     # args = parse_args()
-    num_steps = 10
+    num_steps = 2
     # Load the PocketSynth model checkpoint
 
     lightning_module: LightningModule = hydra.utils.instantiate(cfg.lightning_module)   
     # checkpoint_path = 'outputs/2025-11-13/03-18-24/checkpoints/checkpoint_epoch=3699.ckpt'
-    checkpoint_path = 'outputs/2025-11-30/17-30-49/checkpoints/epoch=4345_val_rmsd=0.00036.ckpt'
+    checkpoint_path = 'joint_kl_8.ckpt'
     # lightning_module = lightning_module.load_from_checkpoint('outputs/2025-11-13/03-20-07/checkpoints/checkpoint_epoch=1399.ckpt')
     checkpoint = torch.load(checkpoint_path, weights_only=False)  # 加载 checkpoint
     lightning_module.load_state_dict(checkpoint["state_dict"],strict=False)  # 加载 state_dict（模型权重）

@@ -71,7 +71,7 @@ def apply_random_rotation(batch: TensorDict, n_augmentations=10) -> TensorDict:
     x = batch["coords"].repeat(naug, 1, 1).to(batch.device)
     mask = batch["padding_mask"].repeat(naug, 1).to(batch.device)
     atomics = batch["atomics"].repeat(naug, 1, 1).to(batch.device)
-    dataset_idx = batch["dataset_idx"].repeat(naug, 1).to(batch.device)
+    data_type = batch["data_type"].repeat(naug, 1).to(batch.device)
     rotations = sample_uniform_rotation(
         shape=x.shape[:-2], dtype=x.dtype, device=x.device
     )
@@ -83,7 +83,7 @@ def apply_random_rotation(batch: TensorDict, n_augmentations=10) -> TensorDict:
             "coords": x_rot,
             "padding_mask": mask,
             "atomics": atomics,
-            "dataset_idx": dataset_idx,
+            "data_type": data_type,
         },
         batch_size=x_rot.shape[0],
     ).to(batch.device)
@@ -123,6 +123,76 @@ def apply_random_translation(batch: TensorDict, n_augmentations=10) -> TensorDic
 
     return augmented_batch
 
+def apply_random_rotation_one(batch: TensorDict) -> TensorDict:
+    """Augment a batch with `n_augmentations` additional random rotations.
+
+    Args:
+        batch: TensorDict with keys `coords`, `padding_mask`, `atomics`.
+        n_augmentations: Number of extra rotated copies to generate.
+
+    Returns:
+        TensorDict with keys `coords`, `padding_mask`, `atomics` and
+        `n_augmentations` extra copies.
+
+    Reference: NVIDIA-Digital-Bio/proteina implementation.
+    """
+    assert batch["coords"].ndim == 3, (
+        f"Augmetations can only be used for simple (x_1) batches [b, n, 3], current shape is {batch['coords'].shape}"
+    )
+    assert batch["padding_mask"].ndim == 2, (
+        f"Augmetations can only be used for simple (mask) batches [b, n], current shape is {batch['padding_mask'].shape}"
+    )
+
+    x = batch["coords"]
+    mask = batch["padding_mask"]
+    atomics = batch["atomics"]
+    data_type = batch["data_type"]
+    rotations = sample_uniform_rotation(
+        shape=x.shape[:-2], dtype=x.dtype, device=x.device
+    )
+
+    x_rot = torch.matmul(x, rotations).to(batch.device)
+
+    return TensorDict(
+        {
+            "coords": x_rot,
+            "padding_mask": mask,
+            "atomics": atomics,
+            "data_type": data_type,
+        },
+        batch_size=x_rot.shape[0],
+    ).to(batch.device)
+
+def apply_random_translation_one(batch: TensorDict) -> TensorDict:
+    """Augment a batch with `n_augmentations` additional random translations.
+    """
+    assert batch["coords"].ndim == 3, (
+        f"Augmetations can only be used for simple (x_1) batches [b, n, 3], current shape is {batch['coords'].shape}"
+    )
+    assert batch["padding_mask"].ndim == 2, (
+        f"Augmetations can only be used for simple (mask) batches [b, n], current shape is {batch['padding_mask'].shape}"
+    )
+
+    x = batch["coords"]
+    mask = batch["padding_mask"]
+    atomics = batch["atomics"]
+    lattices = batch["lattices"]
+    data_type = batch["data_type"]
+    translations = torch.rand(x.shape[0], 1, 3, device=batch.device)
+
+    x_trans = (x + translations) % 1.0
+
+    return TensorDict(
+        {
+            "coords": x_trans,
+            "padding_mask": mask,
+            "atomics": atomics,
+            "lattices": lattices,
+            "data_type": data_type,
+        },
+        batch_size=x_trans.shape[0],
+    ).to(batch.device)
+
 def frac_to_cart_coords(
     frac_coords,
     lattices,
@@ -136,6 +206,18 @@ def frac_to_cart_coords(
 
     return pos
 
+def frac_to_cart_coords_one(
+    frac_coords,
+    lattices,
+    regularized = True,
+):
+    # lattices is of shape (3, 3)
+    # frac_coords is of shape (n, 3)
+    if regularized:
+        frac_coords = frac_coords % 1.
+    pos = torch.einsum('ij,jk->ik', frac_coords, lattices)  # cart coords of shape (b, n, 3)
+
+    return pos
 
 def cart_to_frac_coords(
     cart_coords,

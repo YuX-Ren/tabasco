@@ -12,40 +12,52 @@ import random
 log = RankedLogger(__name__, rank_zero_only=True)
 
 class MixedBatchSampler(BatchSampler):
-    """
-    自定义 BatchSampler，用于从两个数据集中随机抽取纯批次。
-    
-    它首先将两个数据集的索引分开，为每个数据集创建批次，
-    然后随机打乱这些批次的顺序。
-    """
-    def __init__(self, mol_len: int, crystal_len: int, batch_size: int, drop_last: bool = False):
+    def __init__(self, mol_len: int, crystal_len: int, batch_size: int, 
+                 drop_last: bool = False, shuffle: bool = True,
+                 num_replicas: int = 1, rank: int = 0):
         """
         Args:
-            mol_len: 分子数据集的长度。
-            crystal_len: 晶体数据集的长度。
-            batch_size: 批次大小。
-            drop_last: 是否丢弃最后一个不完整的批次。
+            num_replicas (int): 分布式训练的总进程数 (World Size)。
+            rank (int): 当前进程的 ID (Global Rank)。
         """
-        # 我们使用 ConcatDataset，所以索引是连续的
-        # 0 到 (mol_len - 1) 是分子
-        # mol_len 到 (mol_len + crystal_len - 1) 是晶体
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self.shuffle = shuffle
         
+        # 1. 生成所有索引
         mol_indices = list(range(mol_len))
         crystal_indices = list(range(mol_len, mol_len + crystal_len))
         
-        self.batch_size = batch_size
-        self.drop_last = drop_last
+        # 2. DDP 切分 (Sharding)
+        # 这一步至关重要：每个 GPU 只取属于它那一部分的数据
+        if num_replicas > 1:
+            # 保证每个 GPU 分到的数据量尽量均匀
+            # 分子数据切分
+            num_samples_mol = int(math.ceil(len(mol_indices) * 1.0 / num_replicas))
+            total_size_mol = num_samples_mol * num_replicas
+            # 如果需要补齐数据防止越界（可选，这里简单处理，直接切片）
+            # 简单切片方式：[rank::num_replicas] (步长切片)
+            mol_indices = mol_indices[rank::num_replicas]
+            
+            # 晶体数据切分
+            crystal_indices = crystal_indices[rank::num_replicas]
+
+        self.mol_indices_local = mol_indices
+        self.crystal_indices_local = crystal_indices
         
-        # 为每个数据集单独创建批次
-        mol_batches = self._create_batches(mol_indices)
-        crystal_batches = self._create_batches(crystal_indices)
+        # 计算当前 GPU 上的 batches
+        self.batches = self._generate_batches()
+
+    def _generate_batches(self):
+        mol_batches = self._create_batches(self.mol_indices_local)
+        crystal_batches = self._create_batches(self.crystal_indices_local)
+        batches = mol_batches + crystal_batches
         
-        # 合并所有批次并随机排序
-        self.batches = mol_batches + crystal_batches
-        random.shuffle(self.batches)
+        if self.shuffle:
+            random.shuffle(batches)
+        return batches
 
     def _create_batches(self, indices: List[int]) -> List[List[int]]:
-        """辅助函数，用于将索引列表分批。"""
         batches = []
         for i in range(0, len(indices), self.batch_size):
             batch = indices[i:i + self.batch_size]
@@ -54,8 +66,8 @@ class MixedBatchSampler(BatchSampler):
         return batches
 
     def __iter__(self) -> Iterator[List[int]]:
-        # 在每个 epoch 开始时重新打乱批次的 *顺序*
-        random.shuffle(self.batches)
+        # 每个 epoch 重新生成并打乱顺序
+        self.batches = self._generate_batches()
         for batch in self.batches:
             yield batch
 
@@ -246,7 +258,8 @@ class LmdbDataModule(LightningDataModule):
             mol_len=self.mol_train_len,
             crystal_len=self.crystal_train_len,
             batch_size=self.batch_size,
-            drop_last=True  # 训练时通常丢弃最后一个批次
+            drop_last=True,
+            shuffle=True,
         )
 
         # 2. 创建 DataLoader
@@ -265,7 +278,8 @@ class LmdbDataModule(LightningDataModule):
             mol_len=self.mol_val_len,
             crystal_len=self.crystal_val_len,
             batch_size=self.batch_size,
-            drop_last=True  # 训练时通常丢弃最后一个批次
+            drop_last=True,
+            shuffle=False,
         )
         return DataLoader(
             self.val_dataset,
@@ -280,7 +294,8 @@ class LmdbDataModule(LightningDataModule):
             mol_len=self.mol_test_len,
             crystal_len=self.crystal_test_len,
             batch_size=self.batch_size,
-            drop_last=True  # 训练时通常丢弃最后一个批次
+            drop_last=True,
+            shuffle=False,
         )
         return DataLoader(
             self.test_dataset,

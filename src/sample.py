@@ -4,6 +4,9 @@ import pickle
 import lightning as L
 from tabasco.callbacks.ema import EMAOptimizer
 from tabasco.models.lightning_tabasco import LightningTabasco
+from lightning import LightningModule
+import hydra
+from omegaconf import DictConfig
 from tabasco.chem.convert import MoleculeConverter
 from tensordict import TensorDict
 from tabasco.data.lmdb_datamodule import LmdbDataModule
@@ -16,17 +19,23 @@ from pymatgen.analysis.structure_matcher import StructureMatcher
 from tabasco.chem.crystal_matcher import array_dict_to_crystal
 # Manually setting the configuration dictionary (cfg)
 cfg = {
-    "data_dir": "./data/processed_mp20_train.pt",
-    "val_data_dir": "./data/processed_mp20_val.pt",
-    "test_data_dir": "./data/processed_mp20_test.pt",
-    "lmdb_dir": "./data/lmdb_mp_20",
+    "data_dir": ".",
+    "crystal_data_dir": "./data/processed_mp20_train.pt",
+    "crystal_val_data_dir": "./data/processed_mp20_val.pt",
+    "crystal_test_data_dir": "./data/processed_mp20_test.pt",
+    "crystal_lmdb_dir": "./data/lmdb_mp_20",
+    "mol_data_dir": "./data/processed_qm9_train.pt",
+    "mol_val_data_dir": "./data/processed_qm9_val.pt",
+    "mol_test_data_dir": "./data/processed_qm9_test.pt",
+    "mol_lmdb_dir": "./data/lmdb_qm9",
+    "train_molecules": True,
+    "train_materials": False,
     "add_random_rotation": True,
     "add_random_permutation": False,
     "reorder_to_smiles_order": True,
     "remove_hydrogens": True,
     "batch_size": 256,
     "num_workers": 0,
-    "train_materials": True
 }
 
 def batch_frac_to_cart_coords_with_lattice(
@@ -122,10 +131,10 @@ def compute_rmsd_with_kabsch(batch, out_batch, materials_match = False):
     """
     coords_ref = batch["coords"]
     coords_gen = out_batch["coords"]
-    lattices_ref = batch["lattices"]
-    lattices_gen = out_batch["lattices"]
-    coords_ref = batch_frac_to_cart_coords_with_lattice(coords_ref, lattices_ref)
-    coords_gen = batch_frac_to_cart_coords_with_lattice(coords_gen, lattices_gen)
+    # lattices_ref = batch["lattices"]
+    # lattices_gen = out_batch["lattices"]
+    # coords_ref = batch_frac_to_cart_coords_with_lattice(coords_ref, lattices_ref)
+    # coords_gen = batch_frac_to_cart_coords_with_lattice(coords_gen, lattices_gen)
     real_mask = ~out_batch["padding_mask"]  # ~mask to get True for valid atoms
 
     # Ensure coordinates are on the same device (e.g., CUDA)
@@ -151,8 +160,8 @@ def compute_rmsd_with_kabsch(batch, out_batch, materials_match = False):
             per_molecule_rmsd = np.sqrt(np.mean(sq_diff))
             # print(per_molecule_rmsd)
             # Accumulate RMSD over all molecules
-            if materials_match:
-                per_molecule_rmsd = per_molecule_rmsd * (len(ref_coords) / compute_volume(lattices_ref[i])) ** (1/3)
+            # if materials_match:
+                # per_molecule_rmsd = per_molecule_rmsd * (len(ref_coords) / compute_volume(lattices_ref[i])) ** (1/3)
             rmsds += per_molecule_rmsd.item()
             
     # Return average RMSD over all valid molecules in the batch
@@ -337,16 +346,16 @@ def main():
             print(f"out atom types: {out_atom_types},\n batch atom types: {batch_atom_types}\n\n",file=open("atom_types.txt", "a"))
             if out_atom_types != batch_atom_types:
                 print(f"out atom types: {out_atom_types}, batch atom types: {batch_atom_types}")
-        # break
+        break
     # rmsds /= len(datamodule.test_dataloader())
     rmsd = rmsds/num_graphs
     print(f"rmsd: {rmsd}")
     mse = out_batch["coords"] - batch["coords"]
     mse = mse.pow(2).mean()
     print(f"mse: {mse}")
-    lattice_mse = out_batch["lattices"] - batch["lattices"]
-    lattice_mse = lattice_mse.pow(2).mean()
-    print(f"lattice_mse: {lattice_mse}")
+    # lattice_mse = out_batch["lattices"] - batch["lattices"]
+    # lattice_mse = lattice_mse.pow(2).mean()
+    # print(f"lattice_mse: {lattice_mse}")
     # compare the generated and reference molecules by atom type
 
     # Concatenate results from all batches

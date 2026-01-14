@@ -8,3 +8,10 @@ optimizer:
   lr: 1e-4
   weight_decay: 0.00
   betas: [0.9, 0.995]
+
+# checkpoint_callback:
+#   _target_: pytorch_lightning.callbacks.ModelCheckpoint
+#   dirpath: './checkpoints'
+#   filename: 'last_checkpoint'  # Save checkpoints with this name (will be overwritten)
+#   save_top_k: 1  # Save only the most recent checkpoint
+#   monitor: null  # No specific metric to monitor (save every epoch)

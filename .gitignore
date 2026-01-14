@@ -177,3 +177,7 @@ cluster/
 scripts/
 paper_experiments/
 notebooks/
+best_ckpts/
+*.png 
+*.ckpt 
+*.pt 
