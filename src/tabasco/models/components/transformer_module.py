@@ -331,7 +331,7 @@ class TransformerModule(nn.Module):
         dec_seq_len = seq_len + 3
 
         # build padding mask that matches h_in length
-        dec_padding_mask = torch.cat([padding_mask, torch.zeros(coord_t.shape[0], 3, device=padding_mask.device)], dim=1)
+        dec_padding_mask = torch.cat([torch.zeros(coord_t.shape[0], 3, device=padding_mask.device),padding_mask], dim=1)
         # build masks conditionally (only append 3 tokens if train_materials=True)
         dec_real_mask = torch.cat([torch.ones(coord_t.shape[0], 3, device=padding_mask.device, dtype=real_mask.dtype), real_mask], dim=1)
 
