@@ -182,6 +182,7 @@ class LatentDiffusionLitModule(LightningModule):
                         "t_avg": MeanMetric(),
                         "valid_rate": MeanMetric(),
                         "pb_valid_rate": MeanMetric(),
+                        "diversity": MeanMetric(),
                         "unique_rate": MeanMetric(),
                         "novel_rate": MeanMetric(),
                         "mol_pred_loaded": MeanMetric(),

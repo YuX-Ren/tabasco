@@ -10,13 +10,14 @@ import torch
 import wandb
 from openbabel import openbabel
 from posebusters import PoseBusters
+# from posecheck.utils.strain import calculate_strain_energy
 from pymatgen.analysis.molecule_matcher import MoleculeMatcher
 from pymatgen.core import Molecule
 from rdkit import Chem, RDLogger
 from rdkit.Chem import Draw
 
 from src.utils import joblib_map, pylogger
-
+from datamol import pdist
 RDLogger.DisableLog("rdApp.*")
 
 openbabel.obErrorLog.StopLogging()
@@ -107,6 +108,14 @@ class MoleculeGenerationEvaluator:
         if len(valid_smiles) > 0:
             unique_smiles = set(valid_smiles)
             novel_smiles = unique_smiles.difference(set(self.dataset_smiles_list))
+            dist_vec = pdist(
+            valid_molecules,
+            n_jobs=1,
+            squareform=False,
+            fpSize=2048,
+            fp_type="ecfp",
+            )
+            diversity = torch.tensor(dist_vec.mean(), device=self.device)
             validity_metrics_dict = {
                 "valid_rate": torch.tensor(
                     len(valid_smiles) / len(self.pred_rdkit_list), device=self.device
@@ -117,6 +126,7 @@ class MoleculeGenerationEvaluator:
                 "novel_rate": torch.tensor(
                     len(novel_smiles) / len(valid_smiles), device=self.device
                 ),
+                "diversity": diversity,
             }
             results = self.buster.bust(valid_molecules, None, None)
             pb_metrics_dict = results.mean().to_dict()
@@ -125,6 +135,15 @@ class MoleculeGenerationEvaluator:
                 posebusters_sum += 0 if row.isin([False]).any() else 1
             pb_valid_rate = posebusters_sum / len(valid_molecules)
             pb_metrics_dict["pb_valid_rate"] = pb_valid_rate
+            # strain_energy_list = []
+            # for mol in valid_molecules:
+            #     strain_energy = calculate_strain_energy(mol, num_confs=50)/ mol.GetNumAtoms()
+            #     if strain_energy is not None:
+            #         strain_energy_list.append(strain_energy)
+            # strain_energy_metrics_dict = {
+            #     "strain_energy_mean": torch.tensor(np.mean(strain_energy_list), device=self.device),
+            #     "strain_energy_median": torch.tensor(np.median(strain_energy_list), device=self.device),
+            # }
         else:
             validity_metrics_dict = {
                 "valid_rate": torch.tensor(0.0, device=self.device),
@@ -132,7 +151,6 @@ class MoleculeGenerationEvaluator:
                 "novel_rate": torch.tensor(0.0, device=self.device),
             }
             pb_metrics_dict = {
-                "pb_valid_rate": 0.0,
                 "mol_pred_loaded": 0.0,
                 "sanitization": 0.0,
                 "inchi_convertible": 0.0,
@@ -143,6 +161,8 @@ class MoleculeGenerationEvaluator:
                 "aromatic_ring_flatness": 0.0,
                 "double_bond_flatness": 0.0,
                 "internal_energy": 0.0,
+                # "strain_energy_mean": torch.tensor(0.0, device=self.device),
+                # "strain_energy_median": torch.tensor(0.0, device=self.device),
             }
 
         metrics_dict = {**validity_metrics_dict, **pb_metrics_dict}
