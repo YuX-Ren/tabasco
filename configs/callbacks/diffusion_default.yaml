@@ -1,5 +1,5 @@
 defaults:
-  - ema
+  - dit_ema
   - model_checkpoint
   # - early_stopping
   # - learning_rate_monitor

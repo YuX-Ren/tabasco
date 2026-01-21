@@ -1,13 +1,13 @@
 _target_: src.tabasco.models.ldm_module.LatentDiffusionLitModule
 
-autoencoder_ckpt: "pdb_kl_32.ckpt"  # path to VAE checkpoint
+autoencoder_ckpt: "protein_kl_32.ckpt"  # path to VAE checkpoint
 
 denoiser:
   _target_: src.tabasco.models.denoisers.dit.DiT
   d_x: 32
-  d_model: 768    # 384, 768, 1024
-  nhead: 12        # 6, 12, 16
-  num_layers: 12  # 12, 12, 24
+  d_model: 1024    # 384, 768, 1024
+  nhead: 16        # 6, 12, 16
+  num_layers: 16  # 12, 12, 24
   num_datasets: 3
   
 interpolant:
