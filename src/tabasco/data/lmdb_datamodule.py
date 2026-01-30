@@ -5,9 +5,6 @@ from tabasco.data.utils import TensorDictCollator
 from tabasco.data.components.lmdb_unconditional import UnconditionalLMDBDataset
 from tabasco.data.components.lmdb_pdb import ProteinLMDBDataset
 from torch.utils.data import DataLoader
-from tabasco.utils import RankedLogger
-
-log = RankedLogger(__name__, rank_zero_only=True)
 
 
 class LmdbDataModule(LightningDataModule):

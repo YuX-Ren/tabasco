@@ -12,9 +12,6 @@ from tabasco.chem.utils import reorder_molecule_by_smiles
 from rdkit import Chem
 from tabasco.data.transforms import random_rotation, permute_atoms
 
-from tabasco.utils import RankedLogger
-
-logger = RankedLogger(__name__)
 
 
 class UnconditionalLMDBDataset(BaseLMDBDataset):

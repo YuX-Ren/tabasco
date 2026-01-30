@@ -22,6 +22,84 @@ class PositionalEncoding(ABC, nn.Module):
         pass
 
 
+class RopeEncoding(PositionalEncoding):
+    """Rotary positional encoding (RoPE) as positional embedding."""
+
+    def __init__(self, posenc_dim, max_len=100, random_permute=False):
+        """
+        RoPE implementation per https://arxiv.org/abs/2104.09864.
+
+        Args:
+            posenc_dim: the model hidden dimension (should be even, but odd is handled simply)
+            max_len: max timesteps supported
+            random_permute: ignored (kept for API compatibility)
+        """
+        super().__init__()
+        self.posenc_dim = posenc_dim
+        self.max_len = max_len
+        # We allow random_permute for API compatibility only.
+        self.random_permute = random_permute
+
+        # Precompute RoPE frequencies
+        half_dim = posenc_dim // 2
+        inv_freq = 1.0 / (
+            10000 ** (torch.arange(0, half_dim, dtype=torch.float32) / half_dim)
+        )  # shape: (half_dim,)
+
+        pos = torch.arange(max_len, dtype=torch.float32)  # (max_len,)
+        freqs = torch.einsum('i,j->ij', pos, inv_freq)    # (max_len, half_dim)
+        emb = torch.cat([torch.sin(freqs), torch.cos(freqs)], dim=-1)  # (max_len, posenc_dim)
+        if posenc_dim % 2 == 1:
+            emb = F.pad(emb, (0, 1), mode="constant")
+
+        # emb: (max_len, posenc_dim)
+        emb = emb.unsqueeze(0)  # (1, max_len, posenc_dim)
+        self.register_buffer("pos_embed", emb, persistent=False)
+
+    def rope_rotate(self, x, pos_emb):
+        """
+        x: (B, seq_len, D)
+        pos_emb: (1, seq_len, D)
+
+        Applies RoPE (Rotary Positional Embedding).
+        """
+        # Only apply to the first even 2*half tokens (the rest are kept as is)
+        d = x.shape[-1]
+        half_dim = d // 2
+
+        x1 = x[..., :half_dim]
+        x2 = x[..., half_dim:2*half_dim]
+        rope_cos = pos_emb[..., half_dim:2*half_dim]
+        rope_sin = pos_emb[..., :half_dim]
+        # Rotary: https://kexue.fm/archives/8265 (sin, cos interleaved)
+        x_new = torch.cat([
+            x1 * rope_cos - x2 * rope_sin,    # even
+            x1 * rope_sin + x2 * rope_cos     # odd
+        ], dim=-1)
+        if d > 2 * half_dim:
+            # In case there is odd dimension left
+            x_new = torch.cat([x_new, x[..., 2*half_dim:]], dim=-1)
+        return x_new
+
+    def forward(self, batch_size: int, seq_len: int):
+        """
+        Return RoPE positional embeddings (not added, but for use in rotary attention).
+        Output shape: (batch_size, seq_len, posenc_dim)
+
+        Usually, RoPE uses a faster in-place application on query/key, but to retain API,
+        we just return the frequencies for rotary application.
+        """
+        pos_embed = self.pos_embed[:, :seq_len, :].expand(batch_size, -1, -1)
+
+        # For API (for positional bias or additive), we just return these emb values.
+        # If you want to apply rotary embedding to q/k: 
+        # rope_rotate(query, pos_embed), rope_rotate(key, pos_embed)
+        return pos_embed
+
+    def out_dim(self):
+        return self.posenc_dim
+
+
 class SinusoidEncoding(PositionalEncoding):
     """Classic sinusoidal positional encoding (Vaswani et al., 2017)."""
 

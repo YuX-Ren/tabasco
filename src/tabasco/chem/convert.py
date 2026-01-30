@@ -15,11 +15,9 @@ import tempfile
 from tabasco.chem.utils import attempt_sanitize, write_xyz_file
 from tabasco.chem.constants import ATOM_COLOR_MAP, ATOM_NAMES, ALL_ATOM_NAMES_WITH_PROTEIN
 from tabasco.data.utils import batch_to_list
-from tabasco.utils import RankedLogger
 from rdkit import RDLogger
 from rdkit.Chem import rdMolAlign
 
-log = RankedLogger(__name__, rank_zero_only=True)
 
 
 class MoleculeConverter:

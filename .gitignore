@@ -178,3 +178,9 @@ scripts/
 paper_experiments/
 notebooks/
 *.ckpt
+*.pdb
+lmdb*
+store/
+*.txt
+*.pt
+wandb

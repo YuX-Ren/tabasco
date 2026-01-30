@@ -15,12 +15,10 @@ from omegaconf import DictConfig
 from tqdm import tqdm
 from tensordict import TensorDict
 import shutil
-from src.utils import pylogger
 from tabasco.data.transforms import apply_random_rotation_one
 from torch.nn import ModuleDict
 from torchmetrics import MeanMetric
 
-log = pylogger.RankedLogger(__name__)
 
 from tabasco.chem.constants import restypes_with_x, ATOM_NAMES_OFFSET
 from tabasco.chem.utils import save_aa_coords
@@ -329,30 +327,6 @@ class LatentDiffusionLitModule(LightningModule):
         os.makedirs(self.hparams.sampling.save_dir +f"/epoch_{self.current_epoch}/sample_{length}", exist_ok=True)
         save_aa_coords(aatypes_seq_list, coords_list, savedir=self.hparams.sampling.save_dir +f"/epoch_{self.current_epoch}/sample_{length}")
 
-        # batch_metrics = pd.DataFrame(batch_metrics)
-        # self.validation_epoch_metrics.append(batch_metrics)
-        
-        # if len(self.validation_epoch_samples) > 0:
-        #     self.logger.log_table(
-        #         key='valid/samples',
-        #         columns=["sample_path", "global_step", "Protein"],
-        #         data=self.validation_epoch_samples)
-        #     self.validation_epoch_samples.clear()
-        # val_epoch_metrics = pd.concat(self.validation_epoch_metrics)
-        # for metric_name,metric_val in val_epoch_metrics.mean().to_dict().items():
-        #     self.log(
-        #         f'valid/{metric_name}',
-        #         metric_val,
-        #         on_step=False,
-        #         on_epoch=True,
-        #         prog_bar=False,
-        #         batch_size=len(val_epoch_metrics),
-        #         sync_dist=True,
-        #         rank_zero_only=True
-        #     )
-        # self.validation_epoch_metrics.clear()
-
-
     #####################################################################################################
 
     def sample_and_decode(
@@ -411,36 +385,3 @@ class LatentDiffusionLitModule(LightningModule):
             batch_size=out["coords"].shape[0],
         )
         return out, batch, samples
-
-    #####################################################################################################
-
-    def setup(self, stage: str) -> None:
-        """Lightning hook that is called at the beginning of fit (train + validate), validate,
-        test, or predict.
-
-        This is a good hook when you need to build models dynamically or adjust something about
-        them. This hook is called on every process when using DDP.
-
-        :param stage: Either `"fit"`, `"validate"`, `"test"`, or `"predict"`.
-        """
-        if self.hparams.compile and stage == "fit":
-            self.autoencoder = torch.compile(self.autoencoder)
-            self.denoiser = torch.compile(self.denoiser)
-
-    def configure_optimizers(self) -> Dict[str, Any]:
-        optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
-        if self.hparams.scheduler is not None:
-            scheduler = self.hparams.scheduler(optimizer=optimizer)
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "monitor": "val_mp20/valid_rate",
-                    "interval": "epoch",
-                    "frequency": self.hparams.scheduler_frequency,
-                },
-            }
-        return {"optimizer": optimizer}
-
-    def compute_designability(self, protein, length):
-        pass

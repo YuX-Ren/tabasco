@@ -36,6 +36,8 @@ class BaseLMDBDataset(Dataset, ABC):
         self.limit_samples = limit_samples
         self.pre_filter = pre_filter
         self.lmdb_dir = lmdb_dir
+        if not os.path.exists(lmdb_dir):
+            os.makedirs(lmdb_dir)
         self.lmdb_path = os.path.join(lmdb_dir, split + ".lmdb")
         self.index = None
 

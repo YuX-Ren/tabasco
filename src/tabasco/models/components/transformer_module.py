@@ -9,6 +9,7 @@ from tabasco.models.components.common import SwiGLU
 from tabasco.models.components.positional_encoder import (
     SinusoidEncoding,
     TimeFourierEncoding,
+    RopeEncoding,
 )
 from tabasco.models.components.transformer import Transformer
 from tabasco.models.components.fsq import FSQ
@@ -68,7 +69,10 @@ class TransformerModule(nn.Module):
             self.positional_encoding = SinusoidEncoding(
                 posenc_dim=hidden_dim, max_len=512
             )
-
+        else: 
+            self.positional_encoding = RopeEncoding(
+                posenc_dim=hidden_dim, max_len=512
+            )
         if self.concat_combine_input:
             self.combine_input = nn.Linear(4 * hidden_dim, hidden_dim)
 

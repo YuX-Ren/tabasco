@@ -7,18 +7,17 @@ from lightning.pytorch.utilities import grad_norm
 from torch.optim.optimizer import Optimizer
 
 from tabasco.chem.convert import MoleculeConverter
-from tabasco.utils.metrics import (
-    MolecularConnectivity,
-    MolecularLipinski,
-    MolecularLogP,
-    MolecularNovelty,
-    MolecularQEDValue,
-    MolecularUniqueness,
-    MolecularValidity,
-    AtomTypeDistribution,
-    AtomFractionMetric,
-)
-from tabasco.utils.save_gen_mol import SaveGeneratedMols
+# from tabasco.utils.metrics import (
+#     MolecularConnectivity,
+#     MolecularLipinski,
+#     MolecularLogP,
+#     MolecularNovelty,
+#     MolecularQEDValue,
+#     MolecularUniqueness,
+#     MolecularValidity,
+#     AtomTypeDistribution,
+#     AtomFractionMetric,
+# )
 
 class LightningTabasco(L.LightningModule):
     """Thin Lightning wrapper around a flow-matching molecule generator.
@@ -42,32 +41,31 @@ class LightningTabasco(L.LightningModule):
         """
         super().__init__()
         self.model = model
-        self.save_gen_mol = SaveGeneratedMols()
         self.num_sampling_steps = 100
         self.compute_every = 10000
         self.next_compute_step = 0
         self.save_hyperparameters()
 
         self.mol_converter = MoleculeConverter()
-        self.mol_metrics = torch.nn.ModuleDict(
-            {
-                "validity": MolecularValidity(sync_on_compute=False),
-                "connectivity": MolecularConnectivity(sync_on_compute=False),
-                "lipinski": MolecularLipinski(sync_on_compute=False),
-                "mol_logp": MolecularLogP(sync_on_compute=False),
-                "qed": MolecularQEDValue(sync_on_compute=False),
-                "uniqueness": MolecularUniqueness(sync_on_compute=False),
-                "fraction_carbon": AtomFractionMetric(
-                    atom_symbol="C", sync_on_compute=False
-                ),
-                "fraction_nitrogen": AtomFractionMetric(
-                    atom_symbol="N", sync_on_compute=False
-                ),
-                "fraction_oxygen": AtomFractionMetric(
-                    atom_symbol="O", sync_on_compute=False
-                ),
-            }
-        )
+        # self.mol_metrics = torch.nn.ModuleDict(
+        #     {
+        #         "validity": MolecularValidity(sync_on_compute=False),
+        #         "connectivity": MolecularConnectivity(sync_on_compute=False),
+        #         "lipinski": MolecularLipinski(sync_on_compute=False),
+        #         "mol_logp": MolecularLogP(sync_on_compute=False),
+        #         "qed": MolecularQEDValue(sync_on_compute=False),
+        #         "uniqueness": MolecularUniqueness(sync_on_compute=False),
+        #         "fraction_carbon": AtomFractionMetric(
+        #             atom_symbol="C", sync_on_compute=False
+        #         ),
+        #         "fraction_nitrogen": AtomFractionMetric(
+        #             atom_symbol="N", sync_on_compute=False
+        #         ),
+        #         "fraction_oxygen": AtomFractionMetric(
+        #             atom_symbol="O", sync_on_compute=False
+        #         ),
+        #     }
+        # )
 
     def set_data_stats(self, stats: Dict):
         """Pass dataset statistics to sub-modules and init metrics that need them."""
@@ -117,7 +115,7 @@ class LightningTabasco(L.LightningModule):
         for k, v in stats_dict.items():
             self.log(f"val/{k}", v, on_epoch=True, sync_dist=True)
         self.log("val/loss", loss, on_epoch=True, sync_dist=True)
-        
+        self.log("val/rmsd", stats_dict["rmsd"], on_epoch=True, sync_dist=True)
         # if self.trainer.global_rank == 0 and self.trainer.global_step >= self.next_compute_step:
         #     # Update the counter for the next run
         #     self.next_compute_step += self.compute_every
@@ -126,7 +124,7 @@ class LightningTabasco(L.LightningModule):
         #         batch=batch, num_steps=self.num_sampling_steps, return_trajectories=True
         #     )
         #     # caculate rmsd between generated and reference molecules
-        #     # rmsd = self.mol_converter.rmsd_calculation(generated_batch, batch)
+        #     rmsd = self.mol_converter.rmsd_calculation(generated_batch, batch)
         #     # log rmsd
         #     # print(f"rmsd: {rmsd}")
         #     mol_list = self.mol_converter.from_batch(generated_batch)

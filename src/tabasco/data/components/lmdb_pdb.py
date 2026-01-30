@@ -139,6 +139,7 @@ class ProteinLMDBDataset(BaseLMDBDataset):
         raw_data = torch.load(self.data_dir, weights_only=False) # list of objects or dicts
 
         idx_counter = 0
+        print(f"Processing {len(raw_data)} samples...")
         with db.begin(write=True, buffers=True) as txn:
             for item in tqdm(raw_data):
 

@@ -1,7 +1,7 @@
 _target_: tabasco.data.unconditional_datamodule.LmdbDataModule
-data_dir: ${paths.root_dir}/data/processed_pdb_train.pt
-val_data_dir: ${paths.root_dir}/data/processed_pdb_val.pt
-test_data_dir: ${paths.root_dir}/data/processed_pdb_test.pt
+data_dir: ${paths.root_dir}/data/alphadb.pt
+val_data_dir: ${paths.root_dir}/data/scope.pt
+test_data_dir: ${paths.root_dir}/data/scope.pt
 add_random_rotation: true
 add_random_permutation: false
 reorder_to_smiles_order: true

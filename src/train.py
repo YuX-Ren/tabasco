@@ -80,11 +80,11 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     log.info(f"Instantiating model <{cfg.lightning_module._target_}>")
     lightning_module: LightningModule = hydra.utils.instantiate(cfg.lightning_module)
-    checkpoint_path = 'pdb_kl_32.ckpt'
+    checkpoint_path = 'protein_kl_32.ckpt'
     # lightning_module = lightning_module.load_from_checkpoint('outputs/2025-11-13/03-20-07/checkpoints/checkpoint_epoch=1399.ckpt')
     checkpoint = torch.load(checkpoint_path, weights_only=False)  # 加载 checkpoint
     lightning_module.load_state_dict(checkpoint["state_dict"],strict=False)  # 加载 state_dict（模型权重）
-    apply_ema_weights_to_model(lightning_module.model, 'pdb_kl_32.ckpt')
+    apply_ema_weights_to_model(lightning_module.model, 'protein_kl_32.ckpt')
     print('loaded pretrained model')
     log.info("Instantiating callbacks...")
     callbacks: List[Callback] = instantiate_callbacks(cfg.get("callbacks"))
